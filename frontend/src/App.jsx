@@ -84,7 +84,11 @@ function App() {
     }
     const returnedSession = params.get('checkout') === 'success' ? params.get('session_id') : ''
     const pendingSession = returnedSession || (params.get('checkout') === 'cancelled' ? '' : window.localStorage.getItem('saxscribe-enhanced-session') || '')
-    if (pendingSession) {
+    const savedJobId = window.localStorage.getItem('saxscribe-active-job')
+    if (pendingSession && savedJobId && !returnedSession) {
+      setCheckoutSessionId(pendingSession)
+      setPlan('enhanced')
+    } else if (pendingSession) {
       setCheckoutBusy(true)
       fetch(`/api/billing/session/${encodeURIComponent(pendingSession)}`)
         .then(async (response) => {
@@ -104,7 +108,6 @@ function App() {
           if (returnedSession) window.history.replaceState({}, '', window.location.pathname)
         })
     }
-    const savedJobId = window.localStorage.getItem('saxscribe-active-job')
     if (savedJobId) {
       fetch(`/api/jobs/${savedJobId}`)
         .then((response) => response.ok ? response.json() : Promise.reject(new Error('expired')))
