@@ -444,6 +444,7 @@ def run_pipeline(
     original_display_name: str | None = None,
     isolated_display_name: str | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    separation_provider: str | None = None,
 ) -> dict:
     outputs = job_dir / "outputs"
     outputs.mkdir(exist_ok=True)
@@ -455,7 +456,8 @@ def run_pipeline(
 
     candidate_runs: list[dict] = []
     provider_failures: dict[str, str] = {}
-    provider_mode = "uploaded" if isolated_path else settings.separation_provider
+    effective_provider = separation_provider or settings.separation_provider
+    provider_mode = "uploaded" if isolated_path else effective_provider
 
     if isolated_path:
         progress("separating", 24, "Using your isolated horn stem")
@@ -474,11 +476,11 @@ def run_pipeline(
         candidate_runs.append(_evaluate_stem_candidate(candidate, original_path, outputs, facts.bpm, selected_instrument, cancel_check))
     else:
         providers = _separator_providers()
-        order = _provider_order(settings.separation_provider)
+        order = _provider_order(effective_provider)
         for index, provider_name in enumerate(order):
             provider = providers[provider_name]
             should_run = True
-            if settings.separation_provider == "auto" and index == 1 and candidate_runs:
+            if effective_provider == "auto" and index == 1 and candidate_runs:
                 should_run = candidate_runs[0]["quality"] < settings.separation_quality_threshold
             if not should_run:
                 break
@@ -507,7 +509,7 @@ def run_pipeline(
                 if cancel_check and cancel_check():
                     raise JobCancelled("Separation cancelled") from exc
                 provider_failures[provider_name] = str(exc)
-                if settings.separation_provider in {"uvr", "lalal"}:
+                if effective_provider in {"uvr", "lalal"}:
                     raise
 
     if not candidate_runs:

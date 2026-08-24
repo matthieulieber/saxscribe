@@ -1,8 +1,8 @@
 # Third-party notices and license cautions
 
-This project does not redistribute neural-network model weights.
+This Git repository does not contain neural-network model weights. Local setup downloads them on first use, and the hosted Docker build downloads the UVR wind checkpoint into the deployment image.
 
-The local setup downloads model weights on first use. Do not redistribute those checkpoints until their exact redistribution terms are confirmed. Source-code licensing and model-weight licensing are separate questions.
+Do not publish or sell deployment images containing those checkpoints until their exact redistribution and commercial-service terms are confirmed. Source-code licensing and model-weight licensing are separate questions.
 
 | Dependency | Code license | Practical note |
 |---|---|---|
@@ -15,6 +15,7 @@ The local setup downloads model weights on first use. Do not redistribute those 
 | pretty_midi | MIT | Preserve copyright/license notice when distributing. |
 | music21 | BSD-3-Clause | Preserve copyright/license notice when distributing. |
 | OpenAI Python SDK | Apache-2.0 | API usage is governed separately by OpenAI terms. |
+| Stripe Python SDK | MIT | Stripe payment processing is governed separately by the Stripe services agreement. |
 | Google Cloud Python SDKs | Apache-2.0 | Cloud service usage and stored media are governed separately by the Google Cloud agreement. |
 | React / Vite | MIT | Preserve notices when distributing. |
 | FFmpeg | LGPL or GPL depending on build flags | Homebrew installation varies; comply with the actual build's license. |

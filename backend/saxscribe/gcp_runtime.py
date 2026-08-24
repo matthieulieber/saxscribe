@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
+from .billing import PaidCheckout
 from .settings import settings
 
 
@@ -34,6 +35,109 @@ def _document(job_id: str):
     return firestore_client.collection(settings.firestore_collection).document(job_id)
 
 
+def _payment_document(session_id: str):
+    firestore_client, _ = _clients()
+    return firestore_client.collection(settings.firestore_payments_collection).document(session_id)
+
+
+class CheckoutAlreadyUsed(RuntimeError):
+    pass
+
+
+def get_checkout_claimed_job(session_id: str) -> str | None:
+    snapshot = _payment_document(session_id).get()
+    if not snapshot.exists:
+        return None
+    return (snapshot.to_dict() or {}).get("claimed_job_id")
+
+
+def record_checkout_event(session) -> None:
+    metadata = session.get("metadata") or {}
+    if metadata.get("saxscribe_plan") != "enhanced":
+        return
+    session_id = str(session.get("id") or "")
+    if not session_id:
+        return
+    _payment_document(session_id).set(
+        {
+            "session_id": session_id,
+            "payment_status": session.get("payment_status"),
+            "status": session.get("status"),
+            "amount_total": session.get("amount_total"),
+            "currency": session.get("currency"),
+            "payment_intent_id": session.get("payment_intent"),
+            "plan": "enhanced",
+            "checkout_completed_at": datetime.now(timezone.utc).isoformat(),
+        },
+        merge=True,
+    )
+
+
+def claim_checkout_session(payment: PaidCheckout, job_id: str) -> None:
+    try:
+        from google.cloud import firestore
+    except ImportError as exc:
+        raise RuntimeError("google-cloud-firestore is required for hosted billing.") from exc
+    firestore_client, _ = _clients()
+    reference = firestore_client.collection(settings.firestore_payments_collection).document(
+        payment.session_id
+    )
+    transaction = firestore_client.transaction()
+
+    @firestore.transactional
+    def claim(current_transaction) -> None:
+        snapshot = reference.get(transaction=current_transaction)
+        existing = snapshot.to_dict() if snapshot.exists else {}
+        claimed_job_id = existing.get("claimed_job_id")
+        if claimed_job_id and claimed_job_id != job_id:
+            raise CheckoutAlreadyUsed(
+                "This Enhanced payment has already been used for another transcription."
+            )
+        current_transaction.set(
+            reference,
+            {
+                **payment.to_record(),
+                "plan": "enhanced",
+                "payment_status": "paid",
+                "claimed_job_id": job_id,
+                "claimed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            merge=True,
+        )
+
+    claim(transaction)
+
+
+def release_checkout_session(session_id: str, job_id: str) -> None:
+    try:
+        from google.cloud import firestore
+    except ImportError as exc:
+        raise RuntimeError("google-cloud-firestore is required for hosted billing.") from exc
+    firestore_client, _ = _clients()
+    reference = firestore_client.collection(settings.firestore_payments_collection).document(
+        session_id
+    )
+    transaction = firestore_client.transaction()
+
+    @firestore.transactional
+    def release(current_transaction) -> None:
+        snapshot = reference.get(transaction=current_transaction)
+        existing = snapshot.to_dict() if snapshot.exists else {}
+        if existing.get("claimed_job_id") != job_id:
+            return
+        current_transaction.set(
+            reference,
+            {
+                "claimed_job_id": firestore.DELETE_FIELD,
+                "claimed_at": firestore.DELETE_FIELD,
+                "released_at": datetime.now(timezone.utc).isoformat(),
+            },
+            merge=True,
+        )
+
+    release(transaction)
+
+
 def create_job(job_id: str, metadata: dict, original_path: Path, isolated_path: Path | None) -> None:
     firestore_client, storage_client = _clients()
     bucket = storage_client.bucket(settings.gcp_bucket)
@@ -58,6 +162,14 @@ def create_job(job_id: str, metadata: dict, original_path: Path, isolated_path: 
             "updated_at": now,
         }
     )
+
+
+def delete_job(job_id: str) -> None:
+    firestore_client, storage_client = _clients()
+    bucket = storage_client.bucket(settings.gcp_bucket)
+    for blob in bucket.list_blobs(prefix=f"jobs/{job_id}/"):
+        blob.delete()
+    firestore_client.collection(settings.firestore_collection).document(job_id).delete()
 
 
 def dispatch_job(job_id: str) -> None:

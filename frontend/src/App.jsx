@@ -4,6 +4,7 @@ import {
   AudioLines,
   Check,
   CircleAlert,
+  CreditCard,
   FileAudio,
   FileMusic,
   LoaderCircle,
@@ -55,18 +56,54 @@ function FilePicker({ id, label, hint, file, onChange, optional = false }) {
 
 function App() {
   const [health, setHealth] = useState(null)
+  const [billingConfig, setBillingConfig] = useState(null)
   const [original, setOriginal] = useState(null)
   const [isolated, setIsolated] = useState(null)
   const [title, setTitle] = useState('')
   const [artist, setArtist] = useState('')
   const [instrument, setInstrument] = useState('tenor')
-  const [useAi, setUseAi] = useState(false)
+  const [plan, setPlan] = useState('free')
+  const [checkoutSessionId, setCheckoutSessionId] = useState('')
+  const [checkoutBusy, setCheckoutBusy] = useState(false)
   const [highlightUncertain, setHighlightUncertain] = useState(true)
   const [job, setJob] = useState(null)
   const [error, setError] = useState('')
+  const hosted = health?.runtime_mode === 'gcp'
+  const useAi = hosted && plan === 'enhanced'
 
   useEffect(() => {
     fetch('/api/health').then((response) => response.json()).then(setHealth).catch(() => setHealth({ ok: false }))
+    fetch('/api/billing/config').then((response) => response.json()).then(setBillingConfig).catch(() => setBillingConfig(null))
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('checkout') === 'cancelled') {
+      setPlan('enhanced')
+      setCheckoutSessionId('')
+      window.localStorage.removeItem('saxscribe-enhanced-session')
+      setError('Payment was cancelled. No charge was used and no recording was uploaded.')
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+    const returnedSession = params.get('checkout') === 'success' ? params.get('session_id') : ''
+    const pendingSession = returnedSession || (params.get('checkout') === 'cancelled' ? '' : window.localStorage.getItem('saxscribe-enhanced-session') || '')
+    if (pendingSession) {
+      setCheckoutBusy(true)
+      fetch(`/api/billing/session/${encodeURIComponent(pendingSession)}`)
+        .then(async (response) => {
+          const payload = await response.json()
+          if (!response.ok) throw new Error(payload.detail || 'Payment could not be verified.')
+          setCheckoutSessionId(pendingSession)
+          window.localStorage.setItem('saxscribe-enhanced-session', pendingSession)
+          setPlan('enhanced')
+          setError('')
+        })
+        .catch((reason) => {
+          window.localStorage.removeItem('saxscribe-enhanced-session')
+          setError(reason.message)
+        })
+        .finally(() => {
+          setCheckoutBusy(false)
+          if (returnedSession) window.history.replaceState({}, '', window.location.pathname)
+        })
+    }
     const savedJobId = window.localStorage.getItem('saxscribe-active-job')
     if (savedJobId) {
       fetch(`/api/jobs/${savedJobId}`)
@@ -109,23 +146,57 @@ function App() {
       setError('Add the original recording first. It supplies tempo and harmony evidence; downbeat placement still needs review.')
       return
     }
+    if (hosted && plan === 'enhanced' && !checkoutSessionId) {
+      setError('Complete the one-time Enhanced payment before uploading audio.')
+      return
+    }
     const data = new FormData()
     data.append('original', original)
     if (isolated) data.append('isolated', isolated)
     data.append('title', title)
     data.append('artist', artist)
     data.append('instrument', instrument)
-    data.append('use_ai', String(useAi))
+    data.append('plan', hosted ? plan : 'free')
+    data.append('checkout_session_id', hosted ? checkoutSessionId : '')
     data.append('highlight_uncertain', String(highlightUncertain))
     setJob({ status: 'uploading', stage: 'queued', percent: 2, message: 'Uploading the recording' })
     try {
       const response = await fetch('/api/jobs', { method: 'POST', body: data })
       const payload = await response.json()
-      if (!response.ok) throw new Error(payload.detail || 'The job could not start.')
+      if (!response.ok) {
+        if (response.status === 409 && plan === 'enhanced') {
+          window.localStorage.removeItem('saxscribe-enhanced-session')
+          setCheckoutSessionId('')
+        }
+        throw new Error(payload.detail || 'The job could not start.')
+      }
       setJob({ ...payload, status: 'queued', stage: 'queued', percent: 3, message: 'Waiting for the transcription worker' })
     } catch (reason) {
       setError(reason.message)
       setJob(null)
+    }
+  }
+
+  async function beginCheckout() {
+    setError('')
+    setCheckoutBusy(true)
+    try {
+      const response = await fetch('/api/billing/checkout', { method: 'POST' })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.detail || 'Secure checkout could not start.')
+      window.location.assign(payload.url)
+    } catch (reason) {
+      setError(reason.message)
+      setCheckoutBusy(false)
+    }
+  }
+
+  function choosePlan(nextPlan) {
+    setError('')
+    setPlan(nextPlan)
+    if (nextPlan === 'enhanced' && !checkoutSessionId) {
+      setOriginal(null)
+      setIsolated(null)
     }
   }
 
@@ -146,7 +217,19 @@ function App() {
     setJob(null)
   }
 
+  useEffect(() => {
+    if (job?.plan === 'enhanced' && job?.status === 'complete') {
+      window.localStorage.removeItem('saxscribe-enhanced-session')
+      setCheckoutSessionId('')
+    }
+  }, [job?.plan, job?.status])
+
   const busy = job && !['complete', 'error', 'cancelled'].includes(job.status)
+  const selectedPlanReady = !hosted
+    ? health?.free_ready
+    : plan === 'enhanced'
+      ? health?.enhanced_ready && Boolean(checkoutSessionId)
+      : health?.free_ready
   const facts = job?.result?.facts
   const windFile = job?.result?.files?.find((file) => file.role === 'wind_stem')
   const simpleScoreFile = job?.result?.files?.find((file) => file.role === 'musicxml')
@@ -165,7 +248,7 @@ function App() {
         <a className="brand" href="#top" aria-label="SaxScribe home">
           <span className="brand-mark"><Music2 size={19} /></span>
           <span>SaxScribe</span>
-          <em>PRIVATE</em>
+          <em>{hosted ? 'BETA' : 'LOCAL'}</em>
         </a>
         <div className={`server-pill ${health?.ok ? 'online' : ''}`}>
           <span /> {health === null ? 'Checking engine' : !health.ok ? 'Engine offline' : `${health.runtime_mode === 'gcp' ? 'Hosted' : 'Local'} engine · build ${health.build}`}
@@ -175,7 +258,7 @@ function App() {
       <section className="hero" id="top">
         <p className="eyebrow">Audio → editable notation</p>
         <h1>Turn a sax line into<br /><i>sheet music you can use.</i></h1>
-        <p className="lede">Separate the horn, transcribe its pitches, and export an editable draft. Add an optional second check for noisy or complex recordings.</p>
+        <p className="lede">Choose the open-source UVR workflow, or pay once for LALAL.AI separation bundled with a required AI evidence review.</p>
         <div className="pipeline-line" aria-label="Processing stages">
           <span>Full mix</span><b>01</b><span>Horn stem</span><b>02</b><span>Clean MIDI</span><b>03</b><span>Score</span>
         </div>
@@ -188,18 +271,59 @@ function App() {
             <div><h2>Source material</h2><p>The full mix anchors rhythm and key. Add a clean UVR stem if you already have one.</p></div>
           </div>
 
+          {hosted ? (
+            <fieldset className="plan-picker">
+              <legend>Choose a transcription</legend>
+              <div className="plan-grid">
+                <button type="button" className={`plan-card ${plan === 'free' ? 'selected' : ''}`} onClick={() => choosePlan('free')}>
+                  <span className="plan-heading"><b>Free</b><strong>Free</strong></span>
+                  <small>Open-source UVR wind isolation</small>
+                  <small>Deterministic cleanup and confidence colors</small>
+                  <em>No AI review</em>
+                </button>
+                <button
+                  type="button"
+                  className={`plan-card enhanced ${plan === 'enhanced' ? 'selected' : ''}`}
+                  onClick={() => choosePlan('enhanced')}
+                  disabled={!billingConfig?.enhanced?.available && !checkoutSessionId}
+                >
+                  <span className="plan-heading"><b>Enhanced</b><strong>{checkoutSessionId ? 'Paid' : (billingConfig?.enhanced?.price || 'Loading…')}</strong></span>
+                  <small>LALAL.AI wind separation</small>
+                  <small>Required original/stem/score AI review</small>
+                  <em>One transcription · one payment</em>
+                </button>
+              </div>
+              {billingConfig?.enhanced?.reason && !billingConfig.enhanced.available && <p className="warning"><CircleAlert size={15} /> {billingConfig.enhanced.reason}</p>}
+            </fieldset>
+          ) : (
+            <p className="local-plan"><Check size={15} /> Local mode uses the free UVR workflow. No payment, LALAL.AI, or OpenAI call is available.</p>
+          )}
+
+          {hosted && plan === 'enhanced' && !checkoutSessionId ? (
+            <div className="payment-gate">
+              <span><CreditCard size={22} /></span>
+              <h3>Unlock one Enhanced transcription</h3>
+              <p>Payment covers LALAL.AI separation and the required AI comparison of the original recording, horn stem, MIDI, and draft MusicXML.</p>
+              <button type="button" className="primary" disabled={checkoutBusy || !billingConfig?.enhanced?.available} onClick={beginCheckout}>
+                {checkoutBusy ? <><LoaderCircle className="spin" size={18} /> Opening secure checkout…</> : <><CreditCard size={18} /> Pay {billingConfig?.enhanced?.price || ''} with Stripe</>}
+              </button>
+              <small>Choose and upload the recording after payment returns you here. Card details go directly to Stripe.</small>
+              {error && <p className="error"><CircleAlert size={17} />{error}</p>}
+            </div>
+          ) : <>
+
           <FilePicker id="original" label="Original recording" hint="WAV, M4A, MP3, AIFF or FLAC" file={original} onChange={setOriginal} />
-          <FilePicker id="isolated" label="Already isolated horn" hint="Skip UVR and avoid separating twice" file={isolated} onChange={setIsolated} optional />
+          {plan === 'free' && <FilePicker id="isolated" label="Already isolated horn" hint="Skip UVR and avoid separating twice" file={isolated} onChange={setIsolated} optional />}
           {isolated && <p className="warning"><CircleAlert size={15} /> UVR separation will be skipped because an isolated-horn file is selected.</p>}
-          {!isolated && health?.separation_provider === 'uvr' && health?.uvr_model && (
+          {!isolated && plan === 'free' && health?.uvr_model && (
             <p className="metadata-note">
               <SlidersHorizontal size={14} /> {health.uvr_model.replace(/\.pth$/i, '')} · {health.uvr_model_ready ? 'checkpoint verified locally' : 'checkpoint missing'} · {health.uvr_output_label || health.uvr_target_stem} Only ({health.uvr_target_stem}) · VR {health.uvr_vr_window_size} · aggression {health.uvr_vr_aggression} · high-end restoration {health.uvr_vr_high_end_process ? 'on' : 'off'} · {health.uvr_device} / {health.uvr_resampler} · WAV
             </p>
           )}
-          {!isolated && health?.separation_provider !== 'uvr' && health?.separation_provider && (
-            <p className="metadata-note"><SlidersHorizontal size={14} /> Separation mode: {health.separation_provider.toUpperCase()} · primary {health.separation_primary.toUpperCase()} · LALAL {health.lalal_ready ? 'configured' : 'not configured'} · UVR {health.uvr_model_ready ? 'ready' : 'not installed'}</p>
+          {!isolated && plan === 'enhanced' && (
+            <p className="metadata-note"><SlidersHorizontal size={14} /> Enhanced · LALAL.AI {health?.lalal_ready ? 'configured' : 'not configured'} · AI review {health?.ai_ready ? 'configured' : 'not configured'} · payment {checkoutSessionId ? 'verified' : 'required'}</p>
           )}
-          {!isolated && health?.separation_ready === false && <p className="error"><CircleAlert size={15} /> No configured separator is ready. Install the UVR wind model or configure LALAL_API_KEY for the selected separation mode.</p>}
+          {!isolated && selectedPlanReady === false && <p className="error"><CircleAlert size={15} /> The selected workflow is not configured on this server.</p>}
 
           <div className="field-grid">
             <label>Song title<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Optional song title" /></label>
@@ -226,16 +350,13 @@ function App() {
             <input type="checkbox" checked={highlightUncertain} disabled={busy} onChange={(event) => setHighlightUncertain(event.target.checked)} />
           </label>
 
-          <label className="toggle-row">
-            <span><strong>Extra transcription check <em>Uses AI</em></strong><small>Compares the original, horn stem, and score. It can add a missing note or repair an octave only when local pYIN measurements support that change; unsupported suggestions remain unchanged. It also cross-checks key and tempo. Adds processing time and API cost; audio excerpts are sent to OpenAI.</small></span>
-            <input type="checkbox" checked={useAi} disabled={busy} onChange={(event) => setUseAi(event.target.checked)} />
-          </label>
-          {useAi && health && !health.ai_ready && <p className="warning"><CircleAlert size={15} /> The extra check needs an OPENAI_API_KEY. Turn it off to avoid OpenAI; the selected separator behavior is unchanged.</p>}
+          {plan === 'enhanced' && <p className="enhanced-review"><Sparkles size={16} /><span><strong>AI review included</strong><small>Enhanced always compares synchronized original and LALAL horn audio with the MIDI and draft MusicXML. Changes still require local pitch evidence.</small></span></p>}
 
           {error && <p className="error"><CircleAlert size={17} />{error}</p>}
-          <button className="primary" disabled={busy || health?.ok === false || (!isolated && health?.separation_ready === false) || (useAi && health?.ai_ready === false)}>
-            {busy ? <><LoaderCircle className="spin" size={18} /> Processing…</> : <><Sparkles size={18} /> Create sax score</>}
+          <button className="primary" disabled={busy || health?.ok === false || (!isolated && selectedPlanReady === false)}>
+            {busy ? <><LoaderCircle className="spin" size={18} /> Processing…</> : <><Sparkles size={18} /> Create {hosted && plan === 'enhanced' ? 'Enhanced' : 'free'} sax score</>}
           </button>
+          </>}
         </form>
 
         <aside className="panel result-panel">
@@ -283,6 +404,7 @@ function App() {
           {job?.status === 'complete' && (
             <div className="complete-state">
               <div className="success-title"><span><Check size={20} /></span><div><h3>Two drafts ready</h3><p>{job.result.simple_notes ?? job.result.notes} simple notes · {job.result.advanced_notes ?? job.result.notes} detailed notes</p></div></div>
+              <p className={`result-plan ${job.plan === 'enhanced' ? 'enhanced' : ''}`}><Sparkles size={14} /> {job.plan === 'enhanced' ? 'Enhanced · LALAL.AI + AI review' : 'Free · UVR + deterministic review'}</p>
               <div className="facts-grid">
                 <div><small>Concert key</small><strong>{facts.concert_key} {facts.mode}</strong></div>
                 <div><small>Tempo</small><strong>{Math.round(facts.bpm)} BPM</strong></div>
@@ -350,11 +472,11 @@ function App() {
 
       <section className="principles">
         <article><b>01</b><h3>Two audio views</h3><p>The original mix supplies beat, harmony and tuning. The isolated stem supplies the sax pitches.</p></article>
-        <article><b>02</b><h3>Optional second check</h3><p>For difficult recordings, AI compares the source, horn stem, and generated notes to flag likely transcription mistakes before download.</p></article>
+        <article><b>02</b><h3>Pay only for enhancement</h3><p>The free workflow uses UVR. Enhanced bundles LALAL.AI separation with the complete AI evidence review for one transcription.</p></article>
         <article><b>03</b><h3>Editable output</h3><p>MusicXML is the primary deliverable. Open it in MuseScore to finish phrasing and engraving.</p></article>
       </section>
 
-      <footer><span>SaxScribe</span><p>Machine-assisted transcription. Local job files are temporary. OpenAI receives audio only for the optional AI review; configured cloud separators receive audio under their own terms.</p></footer>
+      <footer><span>SaxScribe</span><p>Machine-assisted transcription. Enhanced sends audio to LALAL.AI and OpenAI; Free does not call either service. Payment card details are handled by Stripe.</p></footer>
     </main>
   )
 }

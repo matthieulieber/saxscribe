@@ -168,14 +168,16 @@ class AIReviewTests(unittest.TestCase):
                         audio_chunk_seconds=60, audio_max_chunks=8, client=client,
                     )
 
-    def test_frontend_ai_review_is_optional_and_defaults_off(self):
+    def test_frontend_bundles_ai_review_only_with_hosted_enhanced(self):
         source = (Path(__file__).parents[1] / "frontend" / "src" / "App.jsx").read_text(encoding="utf-8")
-        self.assertIn("const [useAi, setUseAi] = useState(false)", source)
+        self.assertIn("const [plan, setPlan] = useState('free')", source)
         self.assertIn("const [highlightUncertain, setHighlightUncertain] = useState(true)", source)
-        self.assertIn("Extra transcription check", source)
-        self.assertIn("Adds processing time and API cost", source)
-        self.assertIn("audio excerpts are sent to OpenAI", source)
-        self.assertIn("data.append('use_ai', String(useAi))", source)
+        self.assertIn("LALAL.AI wind separation", source)
+        self.assertIn("Required original/stem/score AI review", source)
+        self.assertIn("AI review included", source)
+        self.assertIn("data.append('plan', hosted ? plan : 'free')", source)
+        self.assertIn("data.append('checkout_session_id'", source)
+        self.assertNotIn("setUseAi", source)
         self.assertIn("data.append('highlight_uncertain', String(highlightUncertain))", source)
         self.assertIn("Most notes lack support from the horn stem", source)
         self.assertIn("It can add a missing note or repair an octave only when local pYIN measurements support", source)

@@ -4,7 +4,13 @@ import os
 import tempfile
 from pathlib import Path
 
-from .saxscribe.gcp_runtime import download_object, get_job, update_job, upload_outputs
+from .saxscribe.gcp_runtime import (
+    download_object,
+    get_job,
+    release_checkout_session,
+    update_job,
+    upload_outputs,
+)
 from .saxscribe.pipeline import run_pipeline
 
 
@@ -15,6 +21,13 @@ def main() -> None:
     job = get_job(job_id)
     if not job:
         raise RuntimeError(f"Hosted job {job_id} does not exist.")
+    plan = job.get("plan", "free")
+    if plan not in {"free", "enhanced"}:
+        raise RuntimeError(f"Hosted job {job_id} has an invalid plan.")
+    if plan == "enhanced" and job.get("isolated_object"):
+        raise RuntimeError("Enhanced jobs must use LALAL.AI separation, not an uploaded stem.")
+    use_ai = plan == "enhanced"
+    separation_provider = "lalal" if plan == "enhanced" else "uvr"
 
     with tempfile.TemporaryDirectory(prefix=f"saxscribe-{job_id}-") as directory:
         job_dir = Path(directory)
@@ -38,11 +51,12 @@ def main() -> None:
                 job.get("title", ""),
                 job.get("artist", ""),
                 job.get("instrument", "tenor"),
-                bool(job.get("use_ai", False)),
+                use_ai,
                 bool(job.get("highlight_uncertain", True)),
                 progress,
                 original_display_name=job.get("source_name") or original.name,
                 isolated_display_name=job.get("isolated_source_name"),
+                separation_provider=separation_provider,
             )
             upload_outputs(job_id, job_dir / "outputs")
             update_job(
@@ -54,6 +68,11 @@ def main() -> None:
                 result=result,
             )
         except Exception as exc:
+            if plan == "enhanced" and job.get("payment_session_id"):
+                try:
+                    release_checkout_session(job["payment_session_id"], job_id)
+                except Exception:
+                    pass
             update_job(job_id, status="error", stage="error", message=str(exc), error=str(exc))
             raise
 

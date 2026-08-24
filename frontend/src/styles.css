@@ -50,6 +50,35 @@ h1 i { color: var(--green); font-weight: 400; }
 .panel-title p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .panel-title.compact { padding-bottom: 20px; border-bottom: 1px solid var(--line); }
 
+.plan-picker { margin-bottom: 22px; }
+.plan-picker legend { margin-bottom: 9px; }
+.plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.plan-card { min-height: 132px; border: 1px solid var(--line); border-radius: 12px; padding: 13px; background: #fbfaf6; color: var(--ink); text-align: left; cursor: pointer; display: flex; flex-direction: column; gap: 7px; transition: .18s ease; }
+.plan-card:hover:not(:disabled) { border-color: var(--green); transform: translateY(-1px); }
+.plan-card.selected { border: 2px solid var(--green); padding: 12px; background: #f1f7f3; }
+.plan-card.enhanced.selected { border-color: var(--orange); background: #fff6f0; }
+.plan-card:disabled { opacity: .52; cursor: not-allowed; }
+.plan-heading { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.plan-heading b { font: 400 20px 'DM Serif Display', Georgia, serif; }
+.plan-heading strong { color: var(--green); font-size: 11px; }
+.plan-card.enhanced .plan-heading strong { color: var(--orange); }
+.plan-card small { color: var(--muted); font-size: 9px; line-height: 1.35; }
+.plan-card em { margin-top: auto; color: var(--green); font-style: normal; font-size: 7px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.plan-card.enhanced em { color: var(--orange); }
+.local-plan, .enhanced-review, .result-plan { display: flex; align-items: flex-start; gap: 8px; border-radius: 9px; padding: 11px; font-size: 10px; line-height: 1.45; }
+.local-plan { margin: 0 0 22px; color: var(--green); background: #edf5ef; }
+.payment-gate { min-height: 390px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; border: 1px solid #efc1aa; border-radius: 14px; padding: 30px; background: #fffaf6; }
+.payment-gate > span { width: 50px; height: 50px; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--orange); }
+.payment-gate h3 { margin: 18px 0 8px; font: 400 23px 'DM Serif Display', Georgia, serif; }
+.payment-gate p { max-width: 390px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.payment-gate .primary { max-width: 330px; }
+.payment-gate > small { max-width: 350px; margin-top: 12px; color: var(--muted); font-size: 8px; line-height: 1.45; }
+.enhanced-review { margin-top: 18px; color: #8b4829; background: #fff2e8; }
+.enhanced-review span { display: flex; flex-direction: column; gap: 3px; }
+.enhanced-review small { color: #7a5a4b; font-size: 9px; }
+.result-plan { margin: -8px 0 15px; color: var(--green); background: #edf5ef; align-items: center; }
+.result-plan.enhanced { color: #9a4b27; background: #fff2e8; }
+
 .field-heading { display: flex; justify-content: space-between; margin: 18px 0 8px; font-size: 12px; font-weight: 700; }
 .field-heading span { color: var(--muted); font-weight: 500; font-size: 10px; }
 .dropzone { min-height: 75px; border: 1.5px dashed #b9b2a6; border-radius: 12px; display: flex; align-items: center; padding: 14px; gap: 13px; cursor: pointer; transition: .18s ease; background: rgba(244,239,229,.35); }
@@ -190,6 +219,7 @@ footer p { margin: 0; }
   .workspace { padding: 0 12px 55px; }
   .form-panel, .result-panel { padding: 20px; border-radius: 14px; }
   .field-grid { grid-template-columns: 1fr; }
+  .plan-grid { grid-template-columns: 1fr; }
   .instrument-grid { grid-template-columns: repeat(3, 1fr); }
   .score-versions { grid-template-columns: 1fr; }
   .principles { grid-template-columns: 1fr; gap: 20px; }

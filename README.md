@@ -1,19 +1,19 @@
 # SaxScribe
 
-SaxScribe turns a released recording, original demo, rehearsal recording, or already isolated horn stem into an editable saxophone part. Local mode runs on your Mac. Hosted mode uses an asynchronous Google Cloud Run Job. The AI-powered extra transcription check remains optional.
+SaxScribe turns a released recording, original demo, rehearsal recording, or already isolated horn stem into an editable saxophone part. Local mode runs the free UVR workflow on your Mac. The hosted website offers Free (UVR, no AI) and Enhanced (one paid LALAL.AI separation plus a required AI evidence review) through Stripe Checkout.
 
 ## What it does
 
-1. Separates a wind/horn stem with local UVR, LALAL.AI API v1, or confidence-routed `auto`/`both` mode.
+1. Separates a wind/horn stem with UVR in Free or LALAL.AI API v1 in paid Enhanced.
 2. Runs Xavier Riley's sax-specific MIDI transcription command on the isolated WAV.
 3. Estimates tempo, tuning and key from the original mix; removes fragments, enforces a monophonic line and chooses a conservative straight, swing-eighth, or triplet-eighth grid from the unquantized attacks.
 4. Applies the selected saxophone's written transposition, octave-folds clearly impossible detector outliers into its normal range, and refuses any still-unplayable export.
 5. Measures each candidate MIDI note against pYIN pitch frames and onset timing from the horn stem and original mix.
 6. Scores each note from local pitch, voicing, attack, and relative wind-stem energy evidence. MusicXML can highlight medium-confidence notes in orange and low-confidence notes in red.
-7. Optionally runs three AI phases: web research for the named recording, synchronized original/stem audio comparison, and structured synthesis across the audio evidence, raw/cleaned MIDI and draft MusicXML.
+7. In Enhanced, runs three required AI phases: web research for the named recording, synchronized original/stem audio comparison, and structured synthesis across the audio evidence, raw/cleaned MIDI and draft MusicXML.
 8. Returns Simple and Advanced MusicXML/MIDI versions with instrument-correct MIDI programs, dynamics, short phrase slurs, and optional PDFs when MuseScore is installed. Stems and evidence remain available as diagnostics.
 
-The extra transcription check is off by default. When enabled, an invalid key, exhausted quota, missing model access, network request or response-validation failure stops the job instead of silently pretending that verification succeeded.
+Free never calls LALAL.AI or OpenAI. Enhanced always uses both services; an invalid key, exhausted quota, missing model access, network request or response-validation failure stops the paid job instead of silently pretending that verification succeeded.
 
 This is assisted transcription, not guaranteed publication-ready notation. Swing, scoops, growls, overlapping horns and separation artifacts still need a musician's review.
 
@@ -26,12 +26,11 @@ cd SaxScribe-local
 bash scripts/setup-mac.sh
 ```
 
-Copy `.env.example` to `.env`. `OPENAI_API_KEY` is needed only if you enable the extra transcription check in the interface.
+Copy `.env.example` to `.env`. Local mode does not need Stripe, LALAL.AI, or OpenAI credentials.
 The startup script lets Python parse `.env`; it does not execute the file as shell code, so values such as `"Wind Inst"` are handled safely.
 
 ```bash
 cp .env.example .env
-# Optionally edit .env and add OPENAI_API_KEY for the extra transcription check.
 bash scripts/start-local.sh
 ```
 
@@ -55,7 +54,7 @@ Do not change `UVR_MODEL_NAME` unless you intentionally want to test a different
 
 ## Separation providers
 
-`SEPARATION_PROVIDER` controls the pipeline:
+`SEPARATION_PROVIDER` remains available for development and direct pipeline tests:
 
 - `uvr`: use only the local `17_HP-Wind_Inst-UVR` checkpoint. This is the default for local use.
 - `lalal`: use LALAL.AI API v1 with the Phoenix wind splitter.
@@ -64,15 +63,15 @@ Do not change `UVR_MODEL_NAME` unless you intentionally want to test a different
 
 SaxScribe does not average the two audio waveforms. It transcribes each stem independently and compares the resulting note evidence. The reported routing score is a heuristic for choosing a candidate, not a claimed accuracy percentage. When both providers run, the evidence report includes their note-level agreement.
 
-LALAL mode requires a business API key in `LALAL_API_KEY`. The key stays on the backend and is never sent to the browser.
+The product API does not trust the browser's provider choice. Local and hosted Free are forced to `uvr`; hosted Enhanced is forced to `lalal` and AI review is forced on. LALAL mode requires a business API key in `LALAL_API_KEY`. The key stays on the backend and is never sent to the browser.
 
 ## Optional direct horn stem
 
 If UVR already produced a good `Wind Inst` WAV, choose **Already isolated horn** in the UI. This skips separation and avoids degrading the audio twice.
 
-## Optional extra transcription check
+## Enhanced AI evidence review
 
-When enabled, the review intentionally uses separate API calls:
+Every paid Enhanced transcription intentionally uses separate API calls:
 
 1. The reasoning model researches the supplied song title/artist with web search.
 2. `gpt-audio-1.5` receives synchronized chunks from the original mix and isolated horn for qualitative comparison.
@@ -80,7 +79,7 @@ When enabled, the review intentionally uses separate API calls:
 
 Local pYIN pitch and onset measurements remain the numeric authority because a general audio-language model is not a sample-accurate sax pitch tracker. The audio model is used to find phrase-level discrepancies and propose corrections, but the backend enforces them: a missing note is inserted only when a stable pYIN span supports its pitch in a real gap; a large pitch or octave change requires pYIN support for the proposed pitch; and a long note is deleted only when horn evidence is weak or absent. Rejected AI suggestions are recorded in `evidence.json` and do not change the score.
 
-By default audio is reviewed in 60-second chunks, up to eight chunks. Change `OPENAI_AUDIO_CHUNK_SECONDS` or `OPENAI_AUDIO_MAX_CHUNKS` in `.env` if necessary. Audio review consumes API credits. Synchronized review clips, derived measurements, MIDI data and MusicXML are sent to OpenAI; do not use this workflow for material you are not permitted to process.
+By default audio is reviewed in 60-second chunks, up to eight chunks. Change `OPENAI_AUDIO_CHUNK_SECONDS` or `OPENAI_AUDIO_MAX_CHUNKS` in hosted configuration if necessary. Synchronized review clips, derived measurements, MIDI data and MusicXML are sent to OpenAI; the source recording is also sent to LALAL.AI for separation. Do not use Enhanced for material you are not permitted to process.
 
 ## Output
 
@@ -93,7 +92,7 @@ If MuseScore is installed in its standard macOS location, SaxScribe also renders
 
 The quantizer preserves a fractional leading-note offset and reports it as `pickup_offset_beats`. It does **not** claim reliable automatic downbeat/anacrusis detection; confirm pickup-bar placement in MuseScore.
 
-Neither version requires the extra transcription check. Both contain the same range-validated concert pitches; the difference is rhythmic detail. MusicXML opens directly in MuseScore and preserves SaxScribe's notation choices. Importing MIDI makes MuseScore infer notation again, so MusicXML remains the preferred editable score format.
+Simple and Advanced are notation-detail versions inside either product plan; they are not the Free and Enhanced payment plans. Both contain the same range-validated concert pitches. MusicXML opens directly in MuseScore and preserves SaxScribe's notation choices. Importing MIDI makes MuseScore infer notation again, so MusicXML remains the preferred editable score format.
 
 **Highlight uncertain notes** is enabled by default and does not use OpenAI. In both MusicXML files, black notes have strong local support, orange notes should be reviewed, and red notes have weak pitch/onset support or may be separation artifacts. The result screen reports counts for the Simple score, while `evidence.json` contains each Advanced note's score, flags, and human-readable reasons. MIDI cannot carry visible note colors, so its pitches and timing are unchanged.
 
@@ -109,10 +108,20 @@ Each job is stored under `work/<job-id>/`, including a durable `job.json` status
 
 - The sax transcription repository is alpha software and is installed from GitHub because it is not published on PyPI.
 - Automatic major/minor decisions are unreliable when a song emphasizes the relative major or dominant. Confirm the proposed key in the interface.
-- If the optional extra transcription check is enabled, it can fail because of an invalid key, exhausted quota, missing model access, network problems or service errors. Such failures stop the job and are not reported as successful verification.
+- Enhanced can fail because of an invalid service key, exhausted quota, missing model access, payment-verification error, network problem or service error. Such failures stop the job and are not reported as successful verification.
 - The exact UVR model weight is not redistributed. Check its terms separately before commercial deployment.
 
 ## Google Cloud hosting
+
+Create one active, non-recurring Stripe Price for **SaxScribe Enhanced**. The amount lives in Stripe, not in this codebase. Set `STRIPE_ENHANCED_PRICE_ID` to its `price_...` id and store the Stripe secret key in Google Secret Manager. The server creates a Stripe-hosted Checkout Session, retrieves the returned Session server-side, verifies that it is paid and matches the configured Price, and atomically allows that Checkout Session to start only one Enhanced job. A completed job consumes the purchase; a worker-handled failure releases it for a retry.
+
+The browser never decides which paid features run. The backend derives the package:
+
+- `free` → UVR, AI off, no payment.
+- `enhanced` → paid Session required, LALAL.AI, AI review required, pre-isolated uploads rejected.
+- local runtime → `free` only.
+
+An optional `/api/billing/webhook` endpoint verifies Stripe signatures when `STRIPE_WEBHOOK_SECRET` is configured. Synchronous paid-Session verification remains the job-creation gate.
 
 The hosted architecture uses:
 
@@ -120,9 +129,10 @@ The hosted architecture uses:
 - Cloud Run Job for long-running audio processing.
 - Cloud Storage for private inputs and outputs.
 - Firestore for persistent job progress.
-- Secret Manager for the LALAL business API key.
+- Stripe Checkout for one-time Enhanced purchases.
+- Secret Manager for LALAL.AI, OpenAI and Stripe server keys.
 
-The same container serves the website and runs the worker. See [`deploy/gcp/README.md`](deploy/gcp/README.md). The provided deployment script defaults hosted separation to LALAL so no UVR weight or GPU is required in the production container.
+The same container serves the website and runs the worker. See [`deploy/gcp/README.md`](deploy/gcp/README.md). The container build downloads and checksum-verifies the exact UVR wind model for hosted Free. Per-job metadata sends Free to UVR and paid Enhanced to LALAL.AI plus AI review.
 
 The current hosted upload endpoint is capped at 30 MB. Browser-to-Cloud-Storage resumable uploads are still required before accepting large uncompressed WAV files in production.
 

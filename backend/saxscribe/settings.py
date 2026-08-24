@@ -47,6 +47,13 @@ class Settings:
     gcp_bucket: str = os.getenv("GCP_BUCKET", "")
     gcp_job_name: str = os.getenv("GCP_JOB_NAME", "saxscribe-worker")
     firestore_collection: str = os.getenv("FIRESTORE_COLLECTION", "saxscribe_jobs")
+    firestore_payments_collection: str = os.getenv(
+        "FIRESTORE_PAYMENTS_COLLECTION", "saxscribe_payments"
+    )
+    public_base_url: str = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    stripe_secret_key: str = os.getenv("STRIPE_SECRET_KEY", "")
+    stripe_webhook_secret: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    stripe_enhanced_price_id: str = os.getenv("STRIPE_ENHANCED_PRICE_ID", "")
 
 
 settings = Settings()

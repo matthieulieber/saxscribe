@@ -20,6 +20,20 @@ class WorkflowRegressionTests(unittest.TestCase):
         self.assertIn("render_pdf(simple_xml, simple_pdf)", source)
         self.assertIn("render_pdf(advanced_xml, advanced_pdf)", source)
         self.assertIn("write_events_midi(simple_events, simple_midi, selected_bpm, selected_instrument)", source)
+        self.assertIn("effective_provider = separation_provider or settings.separation_provider", source)
+
+    def test_server_derives_paid_plan_features_instead_of_trusting_the_browser(self):
+        source = (Path(__file__).parents[1] / "backend" / "app.py").read_text(encoding="utf-8")
+        self.assertIn('plan: str = Form("free")', source)
+        self.assertIn('separation_provider = "uvr"', source)
+        self.assertIn('separation_provider = "lalal"', source)
+        self.assertIn("use_ai = True", source)
+        self.assertIn("verify_paid_enhanced_checkout", source)
+        self.assertIn("claim_checkout_session", source)
+        worker = (Path(__file__).parents[1] / "backend" / "cloud_worker.py").read_text(encoding="utf-8")
+        self.assertIn('use_ai = plan == "enhanced"', worker)
+        self.assertIn('separation_provider = "lalal" if plan == "enhanced" else "uvr"', worker)
+        self.assertIn("release_checkout_session(job[\"payment_session_id\"], job_id)", worker)
 
     def test_completed_local_job_state_reloads_from_disk(self):
         previous = settings.work_dir
