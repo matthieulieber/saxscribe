@@ -7,7 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,7 @@ class ReviewResult:
     sources: list[dict]
     audio_comparison: list[dict]
     models: dict
+    refinement_passes: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -108,6 +109,8 @@ def review(
     audio_model: str,
     audio_chunk_seconds: int,
     audio_max_chunks: int,
+    candidate_audio_path: Path | None = None,
+    mismatch_report: dict | None = None,
     client: OpenAI | None = None,
 ) -> ReviewResult:
     """Run the enabled web, audio, and structured evidence review.
@@ -130,6 +133,7 @@ def review(
         audio_model=audio_model,
         chunk_seconds=audio_chunk_seconds,
         max_chunks=audio_max_chunks,
+        candidate_audio_path=candidate_audio_path,
     )
     xml_text = draft_xml_path.read_text(encoding="utf-8")
     data = _structured_review(
@@ -144,6 +148,8 @@ def review(
         research_text=research_text,
         audio_comparison=audio_comparison,
         model=model,
+        mismatch_report=mismatch_report,
+        pass_number=1,
     )
     _validate_result(data, cleaned_events)
     return ReviewResult(
@@ -189,6 +195,7 @@ def _compare_audio(
     audio_model: str,
     chunk_seconds: int,
     max_chunks: int,
+    candidate_audio_path: Path | None = None,
 ) -> list[dict]:
     if not shutil.which("ffmpeg"):
         raise AIReviewError("audio preparation", "FFmpeg is missing. Run scripts/setup-mac.sh again.")
@@ -210,18 +217,27 @@ def _compare_audio(
             duration = min(chunk_seconds, max(0.1, duration_seconds - start))
             original_wav = temp_dir / f"original-{chunk_index}.wav"
             wind_wav = temp_dir / f"wind-{chunk_index}.wav"
+            candidate_wav = temp_dir / f"candidate-{chunk_index}.wav"
             _make_review_wav(original_path, original_wav, start, duration)
             _make_review_wav(wind_path, wind_wav, start, duration)
+            if candidate_audio_path is not None:
+                _make_review_wav(candidate_audio_path, candidate_wav, start, duration)
             end = start + duration
             local_notes = [
                 item for item in transcription_evidence.get("notes", [])
                 if start - 0.05 <= float(item.get("start_seconds", -1)) < end + 0.05
             ]
             prompt = (
-                f"You are hearing two synchronized clips from {start:.2f}s to {end:.2f}s. "
+                f"You are hearing {'three' if candidate_audio_path is not None else 'two'} synchronized clips from {start:.2f}s to {end:.2f}s. "
                 "The first is the ORIGINAL MIX; the second is the ISOLATED WIND/HORN STEM. "
-                "Compare the sax line across them and assess separation leakage, missing phrases, obvious octave errors, "
+                + (
+                    "The third is a neutral synthesized rendering of the current symbolic score. "
+                    if candidate_audio_path is not None
+                    else ""
+                )
+                + "Compare the sax line across them and assess separation leakage, missing phrases, obvious octave errors, "
                 "attacks/rests, meter/downbeat clues, and whether the candidate note sequence follows the audible sax. "
+                "Ignore timbre, room sound, vibrato, and synthesis quality when judging the neutral score rendering. "
                 "Do not claim sample-accurate pitch measurements; the local pYIN table is the numeric authority. "
                 "Return a concise text memo with time ranges and concrete discrepancies.\n"
                 f"Local note evidence for this interval: {json.dumps(local_notes, separators=(',', ':'))}"
@@ -232,6 +248,13 @@ def _compare_audio(
                 {"type": "text", "text": "ISOLATED WIND/HORN STEM follows:"},
                 {"type": "input_audio", "input_audio": {"data": _encoded(wind_wav), "format": "wav"}},
             ]
+            if candidate_audio_path is not None:
+                content.extend(
+                    [
+                        {"type": "text", "text": "NEUTRAL SYNTHESIS OF THE CURRENT SCORE follows:"},
+                        {"type": "input_audio", "input_audio": {"data": _encoded(candidate_wav), "format": "wav"}},
+                    ]
+                )
             try:
                 completion = client.chat.completions.create(
                     model=audio_model,
@@ -271,9 +294,11 @@ def _structured_review(
     research_text: str,
     audio_comparison: list[dict],
     model: str,
+    mismatch_report: dict | None = None,
+    pass_number: int = 1,
 ) -> dict:
     prompt = f"""
-You are the final verifier for a monophonic sax transcription. Reproduce the evidence-based manual workflow: compare the original-mix measurements, isolated-stem measurements, raw MIDI, deterministic cleaned MIDI, draft MusicXML, recording-specific web research, and audio-model listening memos.
+You are verifier pass {pass_number} for a monophonic sax transcription. Reproduce the evidence-based manual workflow: compare the original-mix measurements, isolated-stem measurements, raw MIDI, deterministic cleaned MIDI, draft MusicXML, recording-specific web research, and audio-model listening memos.
 
 Evidence priority:
 1. Local pYIN pitch frames and onset measurements from the isolated stem.
@@ -284,6 +309,8 @@ Evidence priority:
 
 Make conservative note corrections only when confidence is at least 0.80. Never invent notes from a chord chart or web result. Preserve expressive syncopation. Change/delete corrections must reference an existing cleaned-event index. An insert correction must use index -1 and must be supported by a stable pYIN pitch segment in a genuine gap. Omit unchanged notes. Large pitch or octave changes are allowed only when the local measured pitch supports the proposed concert pitch. Long-note deletion is allowed only when local evidence shows weak or absent horn support. Use concert pitch in corrections. Select key/mode/BPM/meter for the uploaded recording; do not confuse the written transposed sax key with concert key.
 
+For a playable lead-sheet refinement, do not restore ornamental fragments merely to imitate performance detail. Prefer readable eighth- and quarter-note values. Add rhythmic complexity only when the measured mismatch report shows that the simpler rhythm loses a structurally important attack. The server independently scores every proposal and will reject it unless audio agreement improves without materially increasing complexity.
+
 Song: {json.dumps({'title': title, 'artist': artist})}
 Original-mix analysis: {json.dumps(facts.to_dict(), separators=(',', ':'))}
 Web research: {research_text}
@@ -291,6 +318,7 @@ Audio comparisons: {json.dumps(audio_comparison, separators=(',', ':'))}
 Raw transcription MIDI events: {json.dumps(raw_events, separators=(',', ':'))}
 Deterministic cleaned MIDI events: {json.dumps(cleaned_events, separators=(',', ':'))}
 Local original/stem/note comparison: {json.dumps(transcription_evidence, separators=(',', ':'))}
+Objective mismatch report for the current candidate: {json.dumps(mismatch_report or {}, separators=(',', ':'))}
 Draft MusicXML (exact text):
 {xml_text}
 """
@@ -306,6 +334,69 @@ Draft MusicXML (exact text):
         return json.loads(output_text)
     except Exception as exc:
         raise AIReviewError("structured MIDI/MusicXML synthesis", exc) from exc
+
+
+def refine_lead_sheet(
+    *,
+    title: str,
+    artist: str,
+    facts: AudioFacts,
+    original_path: Path,
+    wind_path: Path,
+    candidate_audio_path: Path,
+    events: list[dict],
+    draft_xml_path: Path,
+    transcription_evidence: dict,
+    mismatch_report: dict,
+    prior_review: ReviewResult,
+    model: str,
+    audio_model: str,
+    audio_chunk_seconds: int,
+    audio_max_chunks: int,
+    client: OpenAI | None = None,
+) -> ReviewResult:
+    """Run the second and final AI pass against the rendered lead sheet."""
+    if not os.getenv("OPENAI_API_KEY") and client is None:
+        raise AIReviewError("preflight", "OPENAI_API_KEY is missing. Add it to .env and restart SaxScribe.")
+    client = client or OpenAI(timeout=240.0, max_retries=2)
+    audio_comparison = _compare_audio(
+        client=client,
+        original_path=original_path,
+        wind_path=wind_path,
+        duration_seconds=facts.duration_seconds,
+        cleaned_events=events,
+        transcription_evidence=transcription_evidence,
+        audio_model=audio_model,
+        chunk_seconds=audio_chunk_seconds,
+        max_chunks=audio_max_chunks,
+        candidate_audio_path=candidate_audio_path,
+    )
+    data = _structured_review(
+        client=client,
+        title=title,
+        artist=artist,
+        facts=facts,
+        raw_events=events,
+        cleaned_events=events,
+        xml_text=draft_xml_path.read_text(encoding="utf-8"),
+        transcription_evidence=transcription_evidence,
+        research_text=json.dumps(prior_review.researched_song, separators=(",", ":")),
+        audio_comparison=audio_comparison,
+        model=model,
+        mismatch_report=mismatch_report,
+        pass_number=2,
+    )
+    _validate_result(data, events)
+    return ReviewResult(
+        used=True,
+        summary=data["summary"],
+        researched_song=data["researched_song"],
+        selected_context=data["selected_context"],
+        corrections=data["corrections"],
+        sources=prior_review.sources,
+        audio_comparison=audio_comparison,
+        models={"reasoning": model, "audio": audio_model},
+    )
 
 
 def _make_review_wav(source: Path, target: Path, start: float, duration: float) -> None:

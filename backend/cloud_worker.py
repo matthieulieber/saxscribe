@@ -12,6 +12,8 @@ from .saxscribe.gcp_runtime import (
     upload_outputs,
 )
 from .saxscribe.pipeline import run_pipeline
+from .saxscribe.settings import settings
+from .saxscribe.youtube import download_youtube_audio
 
 
 def main() -> None:
@@ -33,28 +35,54 @@ def main() -> None:
         job_dir = Path(directory)
         inputs = job_dir / "inputs"
         inputs.mkdir(parents=True, exist_ok=True)
-        original = inputs / Path(job["original_object"]).name
-        download_object(job["original_object"], original)
-        isolated = None
-        if job.get("isolated_object"):
-            isolated = inputs / Path(job["isolated_object"]).name
-            download_object(job["isolated_object"], isolated)
+        original = None
 
         def progress(stage: str, percent: int, message: str) -> None:
             update_job(job_id, status="running", stage=stage, percent=percent, message=message)
 
         try:
+            if job.get("youtube_url"):
+                source = download_youtube_audio(
+                    job["youtube_url"],
+                    inputs,
+                    max_bytes=settings.max_upload_mb * 1024 * 1024,
+                    max_seconds=settings.max_youtube_seconds,
+                    progress=progress,
+                )
+                original = source.path
+                source_name = f"YouTube · {source.title}"
+                title = job.get("title") or source.title
+                artist = job.get("artist") or source.artist
+                update_job(
+                    job_id,
+                    source_name=source_name,
+                    youtube_video_id=source.video_id,
+                    youtube_duration_seconds=source.duration_seconds,
+                )
+            elif job.get("original_object"):
+                original = inputs / Path(job["original_object"]).name
+                download_object(job["original_object"], original)
+                source_name = job.get("source_name") or original.name
+                title = job.get("title", "")
+                artist = job.get("artist", "")
+            else:
+                raise RuntimeError("Hosted job has neither an uploaded recording nor a YouTube link.")
+            isolated = None
+            if job.get("isolated_object"):
+                isolated = inputs / Path(job["isolated_object"]).name
+                download_object(job["isolated_object"], isolated)
+
             result = run_pipeline(
                 job_dir,
                 original,
                 isolated,
-                job.get("title", ""),
-                job.get("artist", ""),
+                title,
+                artist,
                 job.get("instrument", "tenor"),
                 use_ai,
                 bool(job.get("highlight_uncertain", True)),
                 progress,
-                original_display_name=job.get("source_name") or original.name,
+                original_display_name=source_name,
                 isolated_display_name=job.get("isolated_source_name"),
                 separation_provider=separation_provider,
             )

@@ -138,11 +138,13 @@ def release_checkout_session(session_id: str, job_id: str) -> None:
     release(transaction)
 
 
-def create_job(job_id: str, metadata: dict, original_path: Path, isolated_path: Path | None) -> None:
+def create_job(job_id: str, metadata: dict, original_path: Path | None, isolated_path: Path | None) -> None:
     firestore_client, storage_client = _clients()
     bucket = storage_client.bucket(settings.gcp_bucket)
-    original_object = f"jobs/{job_id}/inputs/{original_path.name}"
-    bucket.blob(original_object).upload_from_filename(str(original_path))
+    original_object = None
+    if original_path:
+        original_object = f"jobs/{job_id}/inputs/{original_path.name}"
+        bucket.blob(original_object).upload_from_filename(str(original_path))
     isolated_object = None
     if isolated_path:
         isolated_object = f"jobs/{job_id}/inputs/{isolated_path.name}"

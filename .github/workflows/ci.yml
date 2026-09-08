@@ -18,8 +18,10 @@ jobs:
           python-version: "3.11"
       - name: Compile Python source
         run: python -m compileall -q backend tests
-      - name: Run isolated billing tests
-        run: python -m unittest tests.test_billing
+      - name: Install MusicXML export dependency
+        run: python -m pip install "music21>=9.1,<10"
+      - name: Run isolated billing, YouTube, export, and frontend contract tests
+        run: python -m unittest tests.test_billing tests.test_youtube tests.test_export tests.test_frontend_contract
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

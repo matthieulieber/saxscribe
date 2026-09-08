@@ -7,6 +7,8 @@ import librosa
 import numpy as np
 import pretty_midi
 
+from .simplify import simplify_events
+
 
 MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
@@ -181,6 +183,13 @@ def clean_performance_midi(
 
     profile = infer_rhythm_profile([note.start / seconds_per_beat for note in corrected])
     minimum_grid = float(profile["grid_beats"])
+    performance_timing = {
+        id(note): {
+            "start_beat": note.start / seconds_per_beat,
+            "end_beat": note.end / seconds_per_beat,
+        }
+        for note in corrected
+    }
     for note in corrected:
         start_beat = _snap_rhythm(note.start / seconds_per_beat, profile["grid"])
         end_beat = _snap_rhythm(note.end / seconds_per_beat, profile["grid"])
@@ -188,11 +197,17 @@ def clean_performance_midi(
         note.end = max(note.start + minimum_grid * seconds_per_beat, end_beat * seconds_per_beat)
 
     merged: list[pretty_midi.Note] = []
+    merged_performance: list[dict] = []
     for note in corrected:
         if merged and note.pitch == merged[-1].pitch and note.start <= merged[-1].end + minimum_grid * seconds_per_beat / 2:
             merged[-1].end = max(merged[-1].end, note.end)
+            merged_performance[-1]["end_beat"] = max(
+                merged_performance[-1]["end_beat"],
+                performance_timing[id(note)]["end_beat"],
+            )
         else:
             merged.append(note)
+            merged_performance.append(dict(performance_timing[id(note)]))
 
     result = pretty_midi.PrettyMIDI(initial_tempo=bpm)
     program, instrument_name = _midi_program(selected_instrument)
@@ -207,12 +222,16 @@ def clean_performance_midi(
             "pitch": note.pitch,
             "start_beat": round(note.start / seconds_per_beat, 4),
             "duration_beats": round((note.end - note.start) / seconds_per_beat, 4),
+            "performance_start_beat": round(raw_timing["start_beat"], 4),
+            "performance_duration_beats": round(
+                raw_timing["end_beat"] - raw_timing["start_beat"], 4
+            ),
             "velocity": note.velocity,
             "rhythm_grid": profile["grid"],
             "rhythm_grid_beats": profile["grid_beats"],
             "pickup_offset_beats": profile["pickup_offset_beats"],
         }
-        for index, note in enumerate(merged)
+        for index, (note, raw_timing) in enumerate(zip(merged, merged_performance))
     ]
 
 
@@ -239,123 +258,6 @@ def write_events_midi(
         )
     midi.instruments.append(instrument)
     midi.write(str(path))
-
-
-def simplify_events(events: list[dict], grid_beats: float = SIMPLE_GRID_BEATS) -> list[dict]:
-    """Create a conservative, monophonic notation version on a coarser grid.
-
-    The advanced event list already carries its selected straight, swing, or
-    triplet grid. This pass does not invent or transpose pitches: it uses a
-    coarse eighth-note grid for straight passages, preserves third-beat slots
-    for swing/triplet passages, resolves tiny collisions, and joins adjacent
-    repetitions of the same pitch.
-    """
-    if grid_beats <= 0:
-        raise ValueError("The simplification grid must be greater than zero.")
-    if not events:
-        return []
-
-    source_grid = str(events[0].get("rhythm_grid", "straight-sixteenth"))
-    expressive_grid = source_grid if source_grid in {"swing-eighth", "triplet-eighth"} else None
-    effective_grid = 1.0 / 3.0 if expressive_grid else grid_beats
-
-    def snap(value: float) -> float:
-        if expressive_grid:
-            return _snap_rhythm(value, expressive_grid)
-        ticks = int(max(0.0, value) / grid_beats + 0.5)
-        return round(ticks * grid_beats, 6)
-
-    candidates: list[dict] = []
-    for event in events:
-        original_start = max(0.0, float(event["start_beat"]))
-        original_duration = max(0.0625, float(event["duration_beats"]))
-        start = snap(original_start)
-        end = snap(original_start + original_duration)
-        if end <= start:
-            end = round(start + effective_grid, 6)
-        candidates.append(
-            {
-                "pitch": int(event["pitch"]),
-                "start_beat": start,
-                "end_beat": end,
-                "velocity": int(event.get("velocity", 88)),
-                "original_duration": original_duration,
-                "confidence_score": float(event.get("confidence_score", 1.0)),
-                "confidence_level": event.get("confidence_level", "high"),
-                "confidence_reasons": list(event.get("confidence_reasons", [])),
-                "confidence_flags": list(event.get("confidence_flags", [])),
-                "possible_non_horn": bool(event.get("possible_non_horn", False)),
-                "source_indices": [int(event.get("index", 0))],
-                "rhythm_grid": source_grid,
-                "rhythm_grid_beats": float(event.get("rhythm_grid_beats", effective_grid)),
-                "pickup_offset_beats": float(event.get("pickup_offset_beats", 0.0)),
-            }
-        )
-
-    # A scoop or detector fragment can land on the same simplified beat as the
-    # principal note. Prefer the longer event instead of creating a chord.
-    by_start: dict[float, dict] = {}
-    for candidate in candidates:
-        existing = by_start.get(candidate["start_beat"])
-        if existing is None or (
-            candidate["original_duration"], candidate["velocity"]
-        ) > (
-            existing["original_duration"], existing["velocity"]
-        ):
-            by_start[candidate["start_beat"]] = candidate
-
-    ordered = sorted(by_start.values(), key=lambda item: (item["start_beat"], item["pitch"]))
-    merged: list[dict] = []
-    for candidate in ordered:
-        if (
-            merged
-            and candidate["pitch"] == merged[-1]["pitch"]
-            and candidate["start_beat"] <= merged[-1]["end_beat"] + effective_grid / 2
-        ):
-            merged[-1]["end_beat"] = max(merged[-1]["end_beat"], candidate["end_beat"])
-            merged[-1]["velocity"] = max(merged[-1]["velocity"], candidate["velocity"])
-            merged[-1]["source_indices"].extend(candidate["source_indices"])
-            merged[-1]["possible_non_horn"] = (
-                merged[-1]["possible_non_horn"] or candidate["possible_non_horn"]
-            )
-            merged[-1]["confidence_reasons"] = list(dict.fromkeys(
-                merged[-1]["confidence_reasons"] + candidate["confidence_reasons"]
-            ))
-            merged[-1]["confidence_flags"] = list(dict.fromkeys(
-                merged[-1]["confidence_flags"] + candidate["confidence_flags"]
-            ))
-            if candidate["confidence_score"] < merged[-1]["confidence_score"]:
-                merged[-1]["confidence_score"] = candidate["confidence_score"]
-                merged[-1]["confidence_level"] = candidate["confidence_level"]
-        else:
-            merged.append(dict(candidate))
-
-    # Keep one playable sax note at a time. Unique starts are at least one grid
-    # unit apart, so shortening an overlap never creates a microscopic note.
-    for index in range(len(merged) - 1):
-        next_start = merged[index + 1]["start_beat"]
-        if merged[index]["end_beat"] > next_start:
-            merged[index]["end_beat"] = next_start
-
-    return [
-        {
-            "index": index,
-            "pitch": item["pitch"],
-            "start_beat": round(item["start_beat"], 4),
-            "duration_beats": round(max(effective_grid, item["end_beat"] - item["start_beat"]), 4),
-            "velocity": item["velocity"],
-            "confidence_score": round(item["confidence_score"], 3),
-            "confidence_level": item["confidence_level"],
-            "confidence_reasons": item["confidence_reasons"],
-            "confidence_flags": item["confidence_flags"],
-            "possible_non_horn": item["possible_non_horn"],
-            "source_indices": item["source_indices"],
-            "rhythm_grid": item["rhythm_grid"],
-            "rhythm_grid_beats": round(item["rhythm_grid_beats"], 6),
-            "pickup_offset_beats": round(item["pickup_offset_beats"], 4),
-        }
-        for index, item in enumerate(merged)
-    ]
 
 
 def read_midi_events(path: Path, bpm: float) -> list[dict]:
@@ -477,6 +379,24 @@ def build_transcription_evidence(
         frame_times,
         seconds_per_beat,
     )
+    # Attach the closest measured attack to each stable pitch span. Later
+    # score refinement can then solve one globally consistent note-to-onset
+    # assignment instead of greedily reusing the same attack for nearby notes.
+    for segment in pitch_segments:
+        segment_start = float(segment["start_seconds"])
+        if len(stem_onsets):
+            closest_onset = float(
+                stem_onsets[int(np.argmin(np.abs(stem_onsets - segment_start)))]
+            )
+            if abs(closest_onset - segment_start) <= 0.22:
+                segment["onset_seconds"] = round(closest_onset, 4)
+                segment["onset_beat"] = round(closest_onset / seconds_per_beat, 4)
+            else:
+                segment["onset_seconds"] = round(segment_start, 4)
+                segment["onset_beat"] = round(float(segment["start_beat"]), 4)
+        else:
+            segment["onset_seconds"] = round(segment_start, 4)
+            segment["onset_beat"] = round(float(segment["start_beat"]), 4)
     note_evidence: list[dict] = []
     for event in events:
         start = float(event["start_beat"]) * seconds_per_beat
@@ -556,6 +476,10 @@ def build_transcription_evidence(
         "mix_to_wind_envelope_correlation": round(envelope_correlation, 4) if envelope_correlation is not None else None,
         "median_note_stem_to_mix_rms_ratio": round(reference_energy_ratio, 5) if reference_energy_ratio is not None else None,
         "stem_onset_count": int(len(stem_onsets)),
+        "stem_onsets_seconds": [round(float(value), 4) for value in stem_onsets],
+        "stem_onsets_beats": [
+            round(float(value) / seconds_per_beat, 4) for value in stem_onsets
+        ],
         "mix_onset_count": int(len(mix_onsets)),
         "candidate_note_count": len(events),
         "high_confidence_note_count": len(reliable),

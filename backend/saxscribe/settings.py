@@ -41,6 +41,10 @@ class Settings:
     openai_audio_chunk_seconds: int = int(os.getenv("OPENAI_AUDIO_CHUNK_SECONDS", "60"))
     openai_audio_max_chunks: int = int(os.getenv("OPENAI_AUDIO_MAX_CHUNKS", "8"))
     max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "250"))
+    youtube_input_enabled: bool = os.getenv("YOUTUBE_INPUT_ENABLED", "true").lower() in {
+        "1", "true", "yes", "on"
+    }
+    max_youtube_seconds: int = int(os.getenv("MAX_YOUTUBE_SECONDS", "480"))
     keep_jobs_hours: int = int(os.getenv("KEEP_JOBS_HOURS", "24"))
     gcp_project: str = os.getenv("GOOGLE_CLOUD_PROJECT", "")
     gcp_region: str = os.getenv("GCP_REGION", "us-west1")

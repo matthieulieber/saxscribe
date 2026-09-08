@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from backend.saxscribe.analysis import AudioFacts
-from backend.saxscribe.llm_review import AIReviewError, review
+from backend.saxscribe.llm_review import AIReviewError, ReviewResult, refine_lead_sheet, review
 
 
 STRUCTURED = {
@@ -125,7 +125,7 @@ class AIReviewTests(unittest.TestCase):
                     audio_chunk_seconds=60, audio_max_chunks=8,
                 )
 
-    def test_required_review_sends_both_recordings_and_synthesizes_all_evidence(self):
+    def test_required_review_sends_recordings_candidate_render_and_all_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             original, wind, xml, events, evidence, facts = self._fixtures(directory)
             client = FakeClient()
@@ -140,7 +140,10 @@ class AIReviewTests(unittest.TestCase):
                     original_path=original, wind_path=wind,
                     raw_events=events, cleaned_events=events, draft_xml_path=xml,
                     transcription_evidence=evidence, model="gpt-5-mini", audio_model="gpt-audio-1.5",
-                    audio_chunk_seconds=60, audio_max_chunks=8, client=client,
+                    audio_chunk_seconds=60, audio_max_chunks=8,
+                    candidate_audio_path=wind,
+                    mismatch_report={"objective_score": 72.5, "mismatches": []},
+                    client=client,
                 )
 
             self.assertTrue(result.used)
@@ -148,11 +151,14 @@ class AIReviewTests(unittest.TestCase):
             self.assertEqual(len(client.responses.calls), 2)
             audio_call = client.chat.completions.calls[0]
             parts = audio_call["messages"][0]["content"]
-            self.assertEqual(sum(part["type"] == "input_audio" for part in parts), 2)
+            self.assertEqual(sum(part["type"] == "input_audio" for part in parts), 3)
+            self.assertIn("NEUTRAL SYNTHESIS", parts[-2]["text"])
             structured_prompt = client.responses.calls[-1]["input"]
             self.assertIn("Raw transcription MIDI events", structured_prompt)
             self.assertIn("Draft MusicXML (exact text)", structured_prompt)
             self.assertIn("Local original/stem/note comparison", structured_prompt)
+            self.assertIn("Objective mismatch report", structured_prompt)
+            self.assertIn("72.5", structured_prompt)
 
     def test_malformed_ai_result_stops_instead_of_falling_back(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -168,21 +174,71 @@ class AIReviewTests(unittest.TestCase):
                         audio_chunk_seconds=60, audio_max_chunks=8, client=client,
                     )
 
+    def test_second_pass_reuses_research_and_targets_playable_lead_sheet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original, wind, xml, events, evidence, facts = self._fixtures(directory)
+            client = FakeClient()
+            prior = ReviewResult(
+                used=True,
+                summary="first pass",
+                researched_song=STRUCTURED["researched_song"],
+                selected_context=STRUCTURED["selected_context"],
+                corrections=[],
+                sources=[{"url": "https://example.com/song", "title": "Song evidence"}],
+                audio_comparison=[],
+                models={"reasoning": "gpt-5-mini", "audio": "gpt-audio-1.5"},
+            )
+
+            def copy_review_audio(source, target, start, duration):
+                shutil.copyfile(source, target)
+
+            with mock.patch("backend.saxscribe.llm_review.shutil.which", return_value="ffmpeg"), \
+                 mock.patch("backend.saxscribe.llm_review._make_review_wav", side_effect=copy_review_audio):
+                result = refine_lead_sheet(
+                    title="Test Song",
+                    artist="Test Artist",
+                    facts=facts,
+                    original_path=original,
+                    wind_path=wind,
+                    candidate_audio_path=wind,
+                    events=events,
+                    draft_xml_path=xml,
+                    transcription_evidence=evidence,
+                    mismatch_report={"objective_score": 60, "mismatches": [{"kind": "onset_mismatch"}]},
+                    prior_review=prior,
+                    model="gpt-5-mini",
+                    audio_model="gpt-audio-1.5",
+                    audio_chunk_seconds=60,
+                    audio_max_chunks=8,
+                    client=client,
+                )
+
+            self.assertTrue(result.used)
+            self.assertEqual(len(client.responses.calls), 1)
+            self.assertEqual(len(client.chat.completions.calls), 1)
+            prompt = client.responses.calls[0]["input"]
+            self.assertIn("verifier pass 2", prompt)
+            self.assertIn("playable lead-sheet refinement", prompt)
+            self.assertEqual(result.sources, prior.sources)
+
     def test_frontend_bundles_ai_review_only_with_hosted_enhanced(self):
         source = (Path(__file__).parents[1] / "frontend" / "src" / "App.jsx").read_text(encoding="utf-8")
         self.assertIn("const [plan, setPlan] = useState('free')", source)
         self.assertIn("const [highlightUncertain, setHighlightUncertain] = useState(true)", source)
-        self.assertIn("LALAL.AI wind separation", source)
-        self.assertIn("Required original/stem/score AI review", source)
+        self.assertIn("Enhanced horn isolation", source)
+        self.assertIn("Required audio and score AI review", source)
         self.assertIn("AI review included", source)
         self.assertIn("data.append('plan', hosted ? plan : 'free')", source)
         self.assertIn("data.append('checkout_session_id'", source)
         self.assertNotIn("setUseAi", source)
         self.assertIn("data.append('highlight_uncertain', String(highlightUncertain))", source)
         self.assertIn("Most notes lack support from the horn stem", source)
-        self.assertIn("It can add a missing note or repair an octave only when local pYIN measurements support", source)
+        self.assertIn("Changes still require measured pitch evidence.", source)
+        self.assertNotIn("pYIN", source)
         self.assertIn("saxscribe-active-job", source)
-        self.assertIn("Cancel job", source)
+        self.assertNotIn("Cancel job", source)
+        self.assertNotIn("<small>Separator</small>", source)
+        self.assertNotIn("health.uvr_model", source)
         self.assertLess(source.index("id: 'comparing'"), source.index("id: 'cleaning'"))
 
 

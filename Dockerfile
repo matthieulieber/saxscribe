@@ -12,6 +12,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/opt/huggingface \
     UVR_MODEL_DIR=/opt/saxscribe-models/audio-separator
 WORKDIR /app
+# yt-dlp uses Node 22+ to solve YouTube's JavaScript challenges. The matching
+# EJS scripts are installed by yt-dlp's default dependency group.
+COPY --from=frontend-build /usr/local/bin/node /usr/local/bin/node
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg git libsndfile1 \
     && rm -rf /var/lib/apt/lists/*

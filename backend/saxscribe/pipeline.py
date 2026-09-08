@@ -22,12 +22,23 @@ from .analysis import (
     build_transcription_evidence,
     clean_performance_midi,
     read_midi_events,
-    simplify_events,
     summarize_event_confidence,
     write_events_midi,
 )
-from .export import export_musicxml, normalize_events_to_written_range, render_pdf
-from .llm_review import ReviewResult, apply_safe_corrections, review
+from .export import (
+    export_musicxml,
+    normalize_events_to_written_range,
+    normalize_monophonic_timeline,
+    render_pdf,
+)
+from .llm_review import ReviewResult, apply_safe_corrections, refine_lead_sheet, review
+from .refinement import (
+    accept_refinement,
+    evaluate_candidate,
+    evidence_for_candidate,
+    select_lead_sheet_candidate,
+    synthesize_candidate_audio,
+)
 from .separation import (
     LalalSeparatorProvider,
     StemCandidate,
@@ -490,7 +501,7 @@ def run_pipeline(
             progress(
                 "separating",
                 22 + index * 13,
-                f"Extracting a wind candidate with {provider_name.upper()}",
+                "Isolating the horn audio",
             )
             try:
                 candidate = provider.separate(
@@ -502,7 +513,7 @@ def run_pipeline(
                 progress(
                     "transcribing",
                     46 + index * 10,
-                    f"Transcribing the {provider_name.upper()} wind candidate",
+                    "Transcribing the isolated horn audio",
                 )
                 candidate_runs.append(_evaluate_stem_candidate(candidate, original_path, outputs, facts.bpm, selected_instrument, cancel_check))
             except Exception as exc:
@@ -510,11 +521,12 @@ def run_pipeline(
                     raise JobCancelled("Separation cancelled") from exc
                 provider_failures[provider_name] = str(exc)
                 if effective_provider in {"uvr", "lalal"}:
-                    raise
+                    raise RuntimeError(
+                        "The automatic horn-isolation step failed. Check the server logs and configuration."
+                    ) from exc
 
     if not candidate_runs:
-        detail = "; ".join(f"{name}: {reason}" for name, reason in provider_failures.items())
-        raise RuntimeError(f"No wind separator produced a usable candidate. {detail}")
+        raise RuntimeError("Automatic horn isolation did not produce usable audio.")
 
     _ensure_active(cancel_check)
     progress("comparing", 72, "Selecting the strongest audio-supported transcription")
@@ -562,6 +574,8 @@ def run_pipeline(
     events, deterministic_range_adjustments = normalize_events_to_written_range(
         events, selected_instrument
     )
+    events = normalize_monophonic_timeline(events)
+    write_events_midi(events, deterministic_midi, facts.bpm, selected_instrument)
     draft_xml = outputs / f"deterministic-draft-{selected_instrument}.musicxml"
     export_musicxml(
         events,
@@ -574,6 +588,14 @@ def run_pipeline(
         artist,
         facts.meter,
     )
+    draft_reference_audio = outputs / "deterministic-draft-reference.wav"
+    synthesize_candidate_audio(
+        events,
+        draft_reference_audio,
+        facts.bpm,
+        duration_seconds=facts.duration_seconds,
+    )
+    draft_evaluation = evaluate_candidate(events, transcription_evidence)
 
     if use_ai:
         _ensure_active(cancel_check)
@@ -592,6 +614,8 @@ def run_pipeline(
             audio_model=settings.openai_audio_model,
             audio_chunk_seconds=settings.openai_audio_chunk_seconds,
             audio_max_chunks=settings.openai_audio_max_chunks,
+            candidate_audio_path=draft_reference_audio,
+            mismatch_report=draft_evaluation,
         )
         _ensure_active(cancel_check)
     else:
@@ -606,24 +630,69 @@ def run_pipeline(
             models={},
         )
 
-    final_events, correction_audit = apply_safe_corrections(
+    proposed_advanced_events, correction_audit = apply_safe_corrections(
         events,
         review_result.corrections,
         transcription_evidence,
         return_audit=True,
     )
-    final_events, final_range_adjustments = normalize_events_to_written_range(
-        final_events, selected_instrument
+    proposed_advanced_events, proposed_advanced_range_adjustments = normalize_events_to_written_range(
+        proposed_advanced_events, selected_instrument
     )
     comparison_events = next(
         (item["events"] for item in candidate_runs if item is not selected_run),
         None,
     )
-    final_events = annotate_event_confidence(
-        final_events,
+    proposed_advanced_events = annotate_event_confidence(
+        proposed_advanced_events,
         transcription_evidence,
         comparison_events=comparison_events,
     )
+    proposed_advanced_events = normalize_monophonic_timeline(proposed_advanced_events)
+    first_pass_proposal = evaluate_candidate(
+        proposed_advanced_events,
+        transcription_evidence,
+    )
+    if use_ai and review_result.corrections:
+        first_pass_accepted, first_pass_decision = accept_refinement(
+            draft_evaluation,
+            first_pass_proposal,
+        )
+    else:
+        first_pass_accepted = False
+        first_pass_decision = (
+            "No note revision was proposed in the first pass."
+            if use_ai
+            else "No external AI review was requested."
+        )
+    if first_pass_accepted or not review_result.corrections:
+        final_events = proposed_advanced_events
+        final_range_adjustments = proposed_advanced_range_adjustments
+    else:
+        final_events = annotate_event_confidence(
+            events,
+            transcription_evidence,
+            comparison_events=comparison_events,
+        )
+        final_events = normalize_monophonic_timeline(final_events)
+        final_range_adjustments = []
+        for item in correction_audit:
+            if item["status"] == "applied":
+                item["status"] = "reverted"
+                item["reason"] = f"{item['reason']} {first_pass_decision}"
+    if use_ai:
+        review_result.refinement_passes.append(
+            {
+                "pass": 1,
+                "target": "detailed_performance",
+                "summary": review_result.summary,
+                "correction_count": len(review_result.corrections),
+                "accepted": first_pass_accepted,
+                "decision": first_pass_decision,
+                "baseline_score": draft_evaluation["objective_score"],
+                "proposal_score": first_pass_proposal["objective_score"],
+            }
+        )
     selected_bpm = facts.bpm
     selected_key = facts.concert_key
     selected_mode = facts.mode
@@ -641,19 +710,151 @@ def run_pipeline(
             selected_meter = context["meter"]
 
     _ensure_active(cancel_check)
-    progress("exporting", 93, "Writing simple and advanced scores")
     advanced_events = final_events
-    simple_events = simplify_events(advanced_events)
+    simple_events, deterministic_lead_selection = select_lead_sheet_candidate(
+        advanced_events,
+        selected_bpm,
+        transcription_evidence,
+    )
+    score_refinement = {
+        "method": "Globally assigned local pitch/onset evidence with a lead-sheet complexity budget.",
+        "maximum_ai_passes": 2 if use_ai else 0,
+        "passes_run": 1 if use_ai else 0,
+        "accepted_revisions": 0,
+        "deterministic_candidates": deterministic_lead_selection,
+        "initial": evaluate_candidate(simple_events, transcription_evidence),
+        "final": None,
+        "decision": "Free uses deterministic lead-sheet interpretation without an AI refinement pass.",
+    }
+    lead_refinement_result: ReviewResult | None = None
+    lead_refinement_audit: list[dict] = []
+    initial_lead_evaluation = score_refinement["initial"]
+    should_run_second_pass = bool(
+        use_ai
+        and initial_lead_evaluation["reliable_audio_anchor"]
+        and initial_lead_evaluation["mismatches"]
+        and (
+            float(initial_lead_evaluation["fidelity_score"]) < 92.0
+            or float(initial_lead_evaluation["complexity_score"]) > 30.0
+            or any(
+                float(item.get("severity", 0.0)) >= 0.80
+                for item in initial_lead_evaluation["mismatches"]
+            )
+        )
+    )
+    if should_run_second_pass:
+        _ensure_active(cancel_check)
+        progress("reviewing", 88, "Comparing the draft lead sheet with the recording")
+        lead_pass_xml = outputs / f"lead-sheet-review-pass-1-{selected_instrument}.musicxml"
+        export_musicxml(
+            simple_events,
+            lead_pass_xml,
+            selected_bpm,
+            selected_key,
+            selected_mode,
+            selected_instrument,
+            title,
+            artist,
+            selected_meter,
+            highlight_uncertain=highlight_uncertain,
+            detail_level="simple",
+        )
+        lead_reference_audio = outputs / "lead-sheet-review-pass-1.wav"
+        synthesize_candidate_audio(
+            simple_events,
+            lead_reference_audio,
+            selected_bpm,
+            duration_seconds=facts.duration_seconds,
+        )
+        lead_evidence = evidence_for_candidate(
+            simple_events,
+            transcription_evidence,
+            selected_bpm,
+        )
+        lead_refinement_result = refine_lead_sheet(
+            title=title,
+            artist=artist,
+            facts=facts,
+            original_path=original_path,
+            wind_path=wind_path,
+            candidate_audio_path=lead_reference_audio,
+            events=simple_events,
+            draft_xml_path=lead_pass_xml,
+            transcription_evidence=lead_evidence,
+            mismatch_report=initial_lead_evaluation,
+            prior_review=review_result,
+            model=settings.openai_model,
+            audio_model=settings.openai_audio_model,
+            audio_chunk_seconds=settings.openai_audio_chunk_seconds,
+            audio_max_chunks=settings.openai_audio_max_chunks,
+        )
+        proposed_events, lead_refinement_audit = apply_safe_corrections(
+            simple_events,
+            lead_refinement_result.corrections,
+            lead_evidence,
+            return_audit=True,
+        )
+        proposed_events, proposed_range_adjustments = normalize_events_to_written_range(
+            proposed_events,
+            selected_instrument,
+        )
+        if proposed_range_adjustments:
+            final_range_adjustments.extend(proposed_range_adjustments)
+        proposed_events = annotate_event_confidence(
+            proposed_events,
+            transcription_evidence,
+            comparison_events=comparison_events,
+        )
+        proposed_events = normalize_monophonic_timeline(proposed_events)
+        proposal_evaluation = evaluate_candidate(proposed_events, transcription_evidence)
+        accepted, decision = accept_refinement(
+            initial_lead_evaluation,
+            proposal_evaluation,
+        )
+        score_refinement.update(
+            passes_run=2,
+            accepted_revisions=int(accepted),
+            proposal=proposal_evaluation,
+            decision=decision,
+        )
+        if accepted:
+            simple_events = proposed_events
+        review_result.refinement_passes.append(
+            {
+                "pass": 2,
+                "target": "playable_lead_sheet",
+                "summary": lead_refinement_result.summary,
+                "correction_count": len(lead_refinement_result.corrections),
+                "accepted": accepted,
+                "decision": decision,
+            }
+        )
+    elif use_ai:
+        score_refinement["decision"] = (
+            "The first AI pass and local measurements left no verifiable lead-sheet improvement for a second pass."
+        )
+        review_result.refinement_passes.append(
+            {
+                "pass": 2,
+                "target": "playable_lead_sheet",
+                "summary": "Stopped early because another pass was not objectively justified.",
+                "correction_count": 0,
+                "accepted": False,
+                "decision": score_refinement["decision"],
+            }
+        )
+    score_refinement["final"] = evaluate_candidate(simple_events, transcription_evidence)
+    progress("exporting", 93, "Writing the lead sheet and detailed score")
     simple_confidence = summarize_event_confidence(simple_events)
     advanced_confidence = summarize_event_confidence(advanced_events)
 
-    simple_midi = outputs / "sax-simple-sounding.mid"
-    advanced_midi = outputs / "sax-advanced-sounding.mid"
+    simple_midi = outputs / "sax-playable-lead-sheet.mid"
+    advanced_midi = outputs / "sax-detailed-performance.mid"
     write_events_midi(simple_events, simple_midi, selected_bpm, selected_instrument)
     write_events_midi(advanced_events, advanced_midi, selected_bpm, selected_instrument)
 
-    simple_xml = outputs / f"sax-{selected_instrument}-simple.musicxml"
-    advanced_xml = outputs / f"sax-{selected_instrument}-advanced.musicxml"
+    simple_xml = outputs / f"sax-{selected_instrument}-playable-lead-sheet.musicxml"
+    advanced_xml = outputs / f"sax-{selected_instrument}-detailed-performance.musicxml"
     export_musicxml(
         simple_events,
         simple_xml,
@@ -665,6 +866,7 @@ def run_pipeline(
         artist,
         selected_meter,
         highlight_uncertain=highlight_uncertain,
+        detail_level="simple",
     )
     export_musicxml(
         advanced_events,
@@ -678,8 +880,8 @@ def run_pipeline(
         selected_meter,
         highlight_uncertain=highlight_uncertain,
     )
-    simple_pdf = outputs / f"sax-{selected_instrument}-simple.pdf"
-    advanced_pdf = outputs / f"sax-{selected_instrument}-advanced.pdf"
+    simple_pdf = outputs / f"sax-{selected_instrument}-playable-lead-sheet.pdf"
+    advanced_pdf = outputs / f"sax-{selected_instrument}-detailed-performance.pdf"
     simple_pdf_ready = render_pdf(simple_xml, simple_pdf)
     advanced_pdf_ready = render_pdf(advanced_xml, advanced_pdf)
     rhythm_grid = str(advanced_events[0].get("rhythm_grid", "straight-sixteenth")) if advanced_events else "straight-sixteenth"
@@ -724,10 +926,10 @@ def run_pipeline(
         },
         "notation_versions": {
             "simple": {
-                "grid_beats": round(1.0 / 3.0, 6) if rhythm_grid in {"swing-eighth", "triplet-eighth"} else SIMPLE_GRID_BEATS,
-                "rhythm_grid": rhythm_grid,
+                "grid_beats": float(simple_events[0].get("rhythm_grid_beats", SIMPLE_GRID_BEATS)) if simple_events else SIMPLE_GRID_BEATS,
+                "rhythm_grid": str(simple_events[0].get("rhythm_grid", "straight-eighth")) if simple_events else "straight-eighth",
                 "note_count": len(simple_events),
-                "description": "Recommended readable draft preserving the detected feel on a coarse grid.",
+                "description": "Playable interpretation that corrects small timing drift, removes weak fragments, and preserves supported feel and syncopation.",
             },
             "advanced": {
                 "grid_beats": rhythm_grid_beats,
@@ -747,6 +949,8 @@ def run_pipeline(
         "transcription_evidence": transcription_evidence,
         "ai_review": review_result.to_dict(),
         "ai_correction_audit": correction_audit,
+        "lead_sheet_refinement_audit": lead_refinement_audit,
+        "score_refinement": score_refinement,
         "warning": "Machine-assisted draft. Confirm downbeat, key/mode, articulations and octave choices by ear.",
     }
     evidence_path = outputs / "evidence.json"
@@ -775,8 +979,6 @@ def run_pipeline(
     return {
         "facts": evidence["selected_context"],
         "analysis": facts.to_dict(),
-        "separation_mode": separation_mode,
-        "selected_provider": selected_candidate.provider,
         "confidence": evidence["confidence"],
         "note_confidence": evidence["note_confidence"],
         "highlight_uncertain_notes": highlight_uncertain,
@@ -786,10 +988,21 @@ def run_pipeline(
         "rhythm_grid": rhythm_grid,
         "pickup_offset_beats": pickup_offset,
         "ai_verified": review_result.used,
+        "score_refinement": {
+            "passes_run": score_refinement["passes_run"],
+            "accepted_revisions": score_refinement["accepted_revisions"],
+            "initial_score": score_refinement["initial"]["objective_score"],
+            "final_score": score_refinement["final"]["objective_score"],
+            "decision": score_refinement["decision"],
+        },
         "ai_summary": (
-            review_result.summary
-            if not review_result.corrections
-            else f"{sum(item['status'] == 'applied' for item in correction_audit)} of {len(review_result.corrections)} AI suggestions passed the local audio guards."
+            (
+                f"Two-pass review completed. {score_refinement['decision']}"
+                if score_refinement["passes_run"] == 2
+                else f"AI review completed. {score_refinement['decision']}"
+            )
+            if review_result.used
+            else review_result.summary
         ),
         "source_audio": original_display_name or original_path.name,
         "isolated_upload": isolated_display_name if isolated_path else None,

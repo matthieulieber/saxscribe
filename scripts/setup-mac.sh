@@ -29,8 +29,8 @@ source .venv/bin/activate
 python -m pip install --upgrade pip wheel setuptools
 python -m pip install -r backend/requirements.txt
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "Node 20+ is required. Try: brew install node"
+if ! command -v node >/dev/null 2>&1 || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' 2>/dev/null; then
+  echo "Node 22+ is required by the frontend and YouTube challenge runtime. Try: brew install node"
   exit 1
 fi
 

@@ -190,8 +190,10 @@ class CleanupTests(unittest.TestCase):
             self.assertTrue(target.exists())
             self.assertEqual(len(events), 2)
             self.assertLessEqual(abs(events[1]["pitch"] - events[0]["pitch"]), 12)
+            self.assertIn("performance_start_beat", events[0])
+            self.assertIn("performance_duration_beats", events[0])
 
-    def test_simple_version_uses_eighth_note_grid_and_drops_short_collision(self):
+    def test_simple_version_uses_collision_safe_grid_without_dropping_supported_notes(self):
         advanced = [
             {"index": 0, "pitch": 60, "start_beat": 0.0, "duration_beats": 0.125, "velocity": 70},
             {"index": 1, "pitch": 62, "start_beat": 0.1, "duration_beats": 0.65, "velocity": 90},
@@ -202,24 +204,26 @@ class CleanupTests(unittest.TestCase):
         simple = simplify_events(advanced)
 
         self.assertEqual(advanced, snapshot)
-        self.assertEqual([event["pitch"] for event in simple], [62, 64])
-        self.assertTrue(all((event["start_beat"] * 2).is_integer() for event in simple))
-        self.assertTrue(all((event["duration_beats"] * 2).is_integer() for event in simple))
-        self.assertTrue(all(event["duration_beats"] >= 0.5 for event in simple))
+        self.assertEqual([event["pitch"] for event in simple], [60, 62, 64])
+        self.assertEqual(len({event["start_beat"] for event in simple}), 3)
+        self.assertTrue(all((event["start_beat"] * 16).is_integer() for event in simple))
+        self.assertTrue(all((event["duration_beats"] * 16).is_integer() for event in simple))
 
-    def test_simple_version_merges_adjacent_repeated_pitch(self):
+    def test_simple_version_preserves_supported_repeated_pitch_reattacks(self):
         simple = simplify_events([
             {"index": 0, "pitch": 67, "start_beat": 0.0, "duration_beats": 0.25, "velocity": 80},
             {"index": 1, "pitch": 67, "start_beat": 0.5, "duration_beats": 0.25, "velocity": 88},
             {"index": 2, "pitch": 69, "start_beat": 1.0, "duration_beats": 1.0, "velocity": 86},
         ])
 
-        self.assertEqual(len(simple), 2)
+        self.assertEqual(len(simple), 3)
         self.assertEqual(simple[0]["pitch"], 67)
-        self.assertEqual(simple[0]["duration_beats"], 1.0)
+        self.assertEqual(simple[1]["pitch"], 67)
+        self.assertEqual(simple[0]["source_indices"], [0])
+        self.assertEqual(simple[1]["source_indices"], [1])
         self.assertLessEqual(
-            simple[0]["start_beat"] + simple[0]["duration_beats"],
-            simple[1]["start_beat"],
+            simple[1]["start_beat"] + simple[1]["duration_beats"],
+            simple[2]["start_beat"],
         )
 
     def test_simple_version_preserves_the_weakest_merged_confidence(self):

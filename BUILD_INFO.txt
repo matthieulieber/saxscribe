@@ -1,0 +1,85 @@
+SaxScribe local test package
+
+Version: 0.18.0
+GitHub repository: matthieulieber/saxscribe
+GitHub branch: main
+GitHub base commit: 1c20c21c2c11f9a0869743b1e61d2d22c9941abb
+GitHub status: This release includes YouTube input, the score viewer, MusicXML integrity fixes, cancel-button removal, customer-facing privacy changes, MuseScore compatibility, the bounded score-refinement loop, startup-health handling, and the 0.18.0 non-destructive lead-sheet correction.
+
+Included:
+- Source from the base commit above plus the guarded YouTube-link feature
+- An in-app Playable Lead Sheet/Detailed Performance MusicXML viewer with zoom and direct download
+- OpenSheetMusicDisplay 2.1.2 bundled as an on-demand browser chunk
+- Exact fractional notation timing for straight, swing, and triplet MusicXML
+- Automatic splitting/ties for composite durations before MusicXML serialization
+- Local cancel-job button removed; backend shutdown/cancellation handling retained
+- Local launcher waits for a healthy backend before starting Vite and saves startup failures to work/backend-startup.log
+- Barline ties are created before rests, preventing overfull MusicXML measures
+- Generated MusicXML measure lengths are validated before files are returned
+- Same-time attacks are de-duplicated and overlapping note spans are clipped before MIDI/MusicXML export, including triplet-grid barline cases
+- Exact triplet time-modification is retained while fragile explicit tuplet bracket spans are omitted for MuseScore compatibility
+- Blank artist metadata no longer exports an incorrect Music21 composer credit
+- Candidate scores are rendered as neutral audio for synchronized Enhanced comparison with the original and isolated horn
+- Score notes are globally assigned to measured pitch/onset spans so one detected attack cannot be reused by multiple notes
+- Every AI note revision is kept only when local audio agreement improves within a strict lead-sheet complexity budget
+- Enhanced runs at most two passes and stops early when another pass is not objectively justified
+- The best verified candidate is exported; rejected or non-improving AI changes are reverted and audited
+- Free/local remains deterministic and performs no external AI calls
+- Free/local compares detected and straight-grid rhythmic spellings but never selects a candidate merely because it deleted supported notes
+- Local background-job stages and full exception tracebacks appear in the launch terminal; the traceback is also saved in the job's private error.log
+- Customer UI, health/billing responses, and file endpoints omit separator names, model parameters, and internal diagnostics
+- Paid-flow consent still names external processors before customer audio is submitted
+- The untouched performance timing is retained alongside the first detector grid so notation decisions can use the raw attacks
+- Fixed note-density quotas and phrase-anchor deletion have been removed from Playable Lead Sheet
+- Playable Lead Sheet uses the coarsest collision-safe grid, preserving distinct supported attacks and repeated-pitch rearticulations
+- Short weak artifacts are removed only when evidence coverage is reliable; sparse evidence keeps notes visible for review
+- True triplets and supported sixteenth/thirty-second motion are preserved; swing is written with a feel marking
+- Playable Lead Sheet omits automatic slurs and repeated dynamic changes; Detailed Performance retains detailed phrasing
+- Customer-facing output names and filenames distinguish musical interpretation from raw detail
+- Isolated-horn playback now offers 0.75x, 1x, and 1.25x review speeds
+- Fresh Vite 8.2.0 production frontend build in frontend/dist
+- Local macOS setup and start scripts
+
+Validation completed:
+- Python source compilation passed
+- Complete Python test suite passed (84/84)
+- Non-destructive lead-sheet interpretation tests passed (13/13)
+- MusicXML export regression tests passed with music21 9.9.2 (10/10)
+- Sparse triplet MusicXML round-trips through music21 with exact timing, no explicit tuplet spanners, and no default composer credit
+- Per-pitch global assignment, sparse-anchor rejection, mismatch scoring, candidate selection, complexity-gated acceptance, evidence remapping, and reference-audio synthesis tests passed (9/9)
+- The supplied musician-corrected six-phrase excerpt preserves all 36 labelled sax attacks and its original entrance timing
+- That 36-note regression exports valid tenor MusicXML with collision-safe rhythmic spelling
+- A synthetic Enhanced job completed both bounded review stages and exported its final lead sheet
+- The exact previously failing 13/3-beat triplet overlap now exports as two valid four-beat measures
+- Bartender.aif was decoded and analyzed successfully as 43.406 seconds, 103.36 BPM, and 4/4
+- Shell script syntax checks passed
+- Frontend production build passed (1,785 modules transformed)
+- Initial JavaScript is 227 KB; the 1.3 MB notation renderer loads only when opened
+
+Not validated in this build environment:
+- A live YouTube network download. The downloader is covered with a fake yt-dlp
+  integration, URL/security tests, size/duration configuration, and build checks,
+  but YouTube can still block or change server-side extraction.
+- Browser-level visual interaction with the score modal. Its dependency/API
+  contract and production compilation passed, but no headless browser is
+  installed in this build runtime.
+- A complete Bartender.aif separation/transcription run. The source audio was
+  validated here, but the large separation and sax-transcription model weights
+  are not installed in this build runtime.
+- Live Enhanced API calls. The three-audio request contract, structured second
+  pass, correction guards, acceptance gates, and full synthetic pipeline are
+  tested with fakes, but no paid external call was made from this build runtime.
+
+The complete Python test suite requires the runtime packages installed by
+scripts/setup-mac.sh; those heavy audio dependencies are intentionally not
+bundled in this ZIP.
+
+Local first run or update from 0.12.0/0.13.0 (setup must install yt-dlp,
+yt-dlp-ejs, and the browser score renderer):
+  bash scripts/setup-mac.sh
+  bash scripts/start-local.sh
+
+Then open http://127.0.0.1:5173/ in a browser.
+
+No .env file, API key, model checkpoint, uploaded audio, generated job output,
+virtual environment, node_modules directory, or Git metadata is included.

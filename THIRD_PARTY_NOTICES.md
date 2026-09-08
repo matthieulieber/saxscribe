@@ -17,10 +17,12 @@ Do not publish or sell deployment images containing those checkpoints until thei
 | OpenAI Python SDK | Apache-2.0 | API usage is governed separately by OpenAI terms. |
 | Stripe Python SDK | MIT | Stripe payment processing is governed separately by the Stripe services agreement. |
 | Google Cloud Python SDKs | Apache-2.0 | Cloud service usage and stored media are governed separately by the Google Cloud agreement. |
+| yt-dlp / yt-dlp-ejs | Unlicense | Technical availability does not grant permission to download a video. YouTube's terms, copyright, and the uploader's rights still apply. |
+| OpenSheetMusicDisplay and bundled renderer dependencies | BSD-3-Clause / MIT | Bundled and loaded on demand to render generated MusicXML in the browser. Required notices are preserved in `licenses/SCORE_VIEWER_LICENSES.txt`. |
 | React / Vite | MIT | Preserve notices when distributing. |
 | FFmpeg | LGPL or GPL depending on build flags | Homebrew installation varies; comply with the actual build's license. |
 | MuseScore | GPL-3.0 | This app invokes a separately installed executable and does not redistribute it. |
 
-Recordings and compositions are protected independently of software licenses. Keep outputs private, process only audio you are entitled to use, and do not publish generated scores without the necessary rights.
+Recordings and compositions are protected independently of software licenses. Keep outputs private, process only audio you are entitled to use, and do not publish generated scores without the necessary rights. YouTube's terms restrict downloading and automated access except where YouTube, applicable rights holders, or applicable law authorize it. The in-product confirmation records the user's assertion; it does not create permission.
 
 This file is an engineering summary, not legal advice.

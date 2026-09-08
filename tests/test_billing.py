@@ -70,6 +70,8 @@ class BillingTests(unittest.TestCase):
         self.assertTrue(config["free"]["available"])
         self.assertFalse(config["enhanced"]["available"])
         self.assertFalse(config["free"]["ai_review"])
+        self.assertNotIn("separator", config["free"])
+        self.assertNotIn("separator", config["enhanced"])
 
     def test_checkout_uses_one_configured_price_and_return_token(self):
         with tempfile.TemporaryDirectory() as directory:

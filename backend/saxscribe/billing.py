@@ -82,20 +82,18 @@ def public_billing_config() -> dict[str, Any]:
         "runtime_mode": settings.runtime_mode,
         "free": {
             "available": uvr_ready,
-            "separator": "uvr",
             "ai_review": False,
             "price": "Free",
         },
         "enhanced": {
             "available": False,
-            "separator": "lalal",
             "ai_review": True,
             "billing": "one_time",
             "price": "Unavailable",
         },
     }
     if not uvr_ready:
-        config["free"]["reason"] = "The UVR wind model is not installed."
+        config["free"]["reason"] = "The included transcription workflow is not configured."
     if settings.runtime_mode != "gcp":
         config["enhanced"]["reason"] = "Enhanced is available only on the hosted website."
         return config

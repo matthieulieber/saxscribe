@@ -3,9 +3,12 @@ from __future__ import annotations
 import re
 import os
 import json
+import logging
 import shutil
 import threading
+import traceback
 import uuid
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,10 +25,19 @@ load_dotenv()
 from .saxscribe.pipeline import JobCancelled, run_pipeline  # noqa: E402
 from .saxscribe.settings import settings  # noqa: E402
 from .saxscribe import billing  # noqa: E402
+from .saxscribe.youtube import (  # noqa: E402
+    YouTubeDownloadCancelled,
+    YouTubeSourceError,
+    download_youtube_audio,
+    normalize_youtube_url,
+)
 
 
-app = FastAPI(title="SaxScribe API", version="0.12.0")
-APP_BUILD = "0.12.0"
+app = FastAPI(title="SaxScribe API", version="0.18.0")
+APP_BUILD = "0.18.0"
+# Use uvicorn's configured error logger so worker-thread failures are visible in
+# the same terminal that launched scripts/start-local.sh.
+logger = logging.getLogger("uvicorn.error")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -38,6 +50,44 @@ executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="saxscribe")
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 cancel_events: dict[str, threading.Event] = {}
+PUBLIC_FILE_ROLES = {
+    "wind_stem",
+    "simple_midi",
+    "musicxml",
+    "advanced_midi",
+    "advanced_musicxml",
+    "simple_pdf",
+    "advanced_pdf",
+}
+PUBLIC_JOB_FIELDS = {
+    "id",
+    "status",
+    "stage",
+    "percent",
+    "message",
+    "error",
+    "source_name",
+    "source_type",
+    "isolated_source_name",
+    "instrument",
+    "plan",
+    "use_ai",
+    "highlight_uncertain",
+    "created_at",
+    "updated_at",
+}
+PUBLIC_RESULT_FIELDS = {
+    "facts",
+    "highlight_uncertain_notes",
+    "notes",
+    "simple_notes",
+    "advanced_notes",
+    "rhythm_grid",
+    "ai_summary",
+    "score_refinement",
+    "source_audio",
+    "isolated_upload",
+}
 
 
 def _now() -> str:
@@ -47,6 +97,63 @@ def _now() -> str:
 def _safe_name(name: str | None, fallback: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(name or fallback).name).strip(".-")
     return cleaned or fallback
+
+
+def _public_download_name(item: dict) -> str:
+    if item.get("role") == "wind_stem":
+        return "isolated-horn.wav"
+    return str(item.get("download_name") or item.get("name") or "download")
+
+
+def _public_job(job: dict, job_id: str) -> dict:
+    """Return only customer-facing job data and output files."""
+    result = {
+        key: deepcopy(value)
+        for key, value in job.items()
+        if key in PUBLIC_JOB_FIELDS
+    }
+    internal_result = job.get("result")
+    if internal_result:
+        public_result = {
+            key: deepcopy(value)
+            for key, value in internal_result.items()
+            if key in PUBLIC_RESULT_FIELDS
+        }
+        public_result["confidence"] = {
+            "level": internal_result.get("confidence", {}).get("level", "Review")
+        }
+        public_result["note_confidence"] = {
+            "simple": deepcopy(
+                internal_result.get("note_confidence", {}).get("simple")
+            )
+        }
+        files = []
+        for item in internal_result.get("files", []):
+            if item.get("role") not in PUBLIC_FILE_ROLES:
+                continue
+            public_name = _public_download_name(item)
+            files.append(
+                {
+                    "name": public_name,
+                    "download_name": public_name,
+                    "role": item.get("role"),
+                    "size": item.get("size", 0),
+                    "url": f"/api/jobs/{job_id}/files/{quote(public_name, safe='')}",
+                }
+            )
+        public_result["files"] = files
+        result["result"] = public_result
+    return result
+
+
+def _download_item(job: dict, requested_name: str) -> dict | None:
+    for item in job.get("result", {}).get("files", []):
+        if (
+            item.get("role") in PUBLIC_FILE_ROLES
+            and _public_download_name(item) == requested_name
+        ):
+            return item
+    return None
 
 
 def _set_job(job_id: str, **changes) -> None:
@@ -86,6 +193,7 @@ def _load_local_jobs() -> None:
 
 def _progress(job_id: str):
     def callback(stage: str, percent: int, message: str) -> None:
+        logger.info("Job %s: %s (%s%%) — %s", job_id, stage, percent, message)
         _set_job(job_id, status="running", stage=stage, percent=percent, message=message)
     return callback
 
@@ -93,7 +201,8 @@ def _progress(job_id: str):
 def _run(
     job_id: str,
     job_dir: Path,
-    original: Path,
+    original: Path | None,
+    youtube_url: str | None,
     isolated: Path | None,
     title: str,
     artist: str,
@@ -106,6 +215,27 @@ def _run(
     cancel_event: threading.Event,
 ) -> None:
     try:
+        if youtube_url:
+            source = download_youtube_audio(
+                youtube_url,
+                job_dir / "inputs",
+                max_bytes=settings.max_upload_mb * 1024 * 1024,
+                max_seconds=settings.max_youtube_seconds,
+                cancel_check=cancel_event.is_set,
+                progress=_progress(job_id),
+            )
+            original = source.path
+            original_name = f"YouTube · {source.title}"
+            title = title or source.title
+            artist = artist or source.artist
+            _set_job(
+                job_id,
+                source_name=original_name,
+                youtube_video_id=source.video_id,
+                youtube_duration_seconds=source.duration_seconds,
+            )
+        if original is None:
+            raise RuntimeError("No original recording was provided.")
         result = run_pipeline(
             job_dir,
             original,
@@ -124,7 +254,27 @@ def _run(
         _set_job(job_id, status="complete", stage="complete", percent=100, message="Your score is ready", result=result)
     except JobCancelled:
         _set_job(job_id, status="cancelled", stage="cancelled", percent=0, message="Processing cancelled")
+    except YouTubeDownloadCancelled:
+        _set_job(job_id, status="cancelled", stage="cancelled", percent=0, message="Processing cancelled")
     except Exception as exc:
+        with jobs_lock:
+            failed_stage = jobs.get(job_id, {}).get("stage", "unknown")
+        error_log = job_dir / "error.log"
+        try:
+            error_log.write_text(
+                f"Job {job_id} failed during {failed_stage}: {exc}\n\n"
+                f"{traceback.format_exc()}",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        logger.exception(
+            "Job %s failed during %s: %s (details: %s)",
+            job_id,
+            failed_stage,
+            exc,
+            error_log,
+        )
         _set_job(job_id, status="error", stage="error", message=str(exc), error=str(exc))
 
 
@@ -160,36 +310,10 @@ def health() -> dict:
     model_path = Path(settings.uvr_model_dir) / settings.uvr_model_name
     uvr_ready = model_path.is_file()
     lalal_ready = bool(settings.lalal_api_key)
-    if settings.separation_provider == "uvr":
-        separation_ready = uvr_ready
-    elif settings.separation_provider == "lalal":
-        separation_ready = lalal_ready
-    else:
-        separation_ready = uvr_ready or lalal_ready
     return {
         "ok": True,
         "build": APP_BUILD,
         "runtime_mode": settings.runtime_mode,
-        "uvr_model": settings.uvr_model_name,
-        "uvr_target_stem": settings.uvr_target_stem,
-        "uvr_output_label": settings.uvr_output_label,
-        "uvr_vr_window_size": settings.uvr_vr_window_size,
-        "uvr_vr_aggression": settings.uvr_vr_aggression,
-        "uvr_vr_high_end_process": settings.uvr_vr_high_end_process,
-        "uvr_device": "cpu" if settings.uvr_force_cpu else "automatic",
-        "uvr_resampler": settings.uvr_resampler,
-        "strict_uvr_model": settings.separation_provider == "uvr",
-        "uvr_model_ready": uvr_ready,
-        "uvr_model_sha256": settings.uvr_model_sha256,
-        "separation_provider": settings.separation_provider,
-        "separation_primary": settings.separation_primary,
-        "separation_quality_threshold": settings.separation_quality_threshold,
-        "separation_ready": separation_ready,
-        "lalal_ready": lalal_ready,
-        "lalal_splitter": settings.lalal_splitter,
-        "ai_required": settings.runtime_mode == "gcp",
-        "ai_ready": bool(os.getenv("OPENAI_API_KEY")),
-        "hosted_plans": settings.runtime_mode == "gcp",
         "free_ready": uvr_ready,
         "enhanced_ready": (
             settings.runtime_mode == "gcp"
@@ -198,8 +322,8 @@ def health() -> dict:
             and billing.hosted_enhanced_ready()
         ),
         "billing_ready": billing.hosted_enhanced_ready(),
-        "reasoning_model": settings.openai_model,
-        "audio_model": settings.openai_audio_model,
+        "youtube_input_enabled": settings.youtube_input_enabled,
+        "max_youtube_seconds": settings.max_youtube_seconds,
     }
 
 
@@ -260,8 +384,10 @@ async def stripe_webhook(request: Request) -> dict:
 
 @app.post("/api/jobs")
 async def create_job(
-    original: UploadFile = File(...),
+    original: UploadFile | None = File(None),
     isolated: UploadFile | None = File(None),
+    youtube_url: str = Form(""),
+    youtube_authorized: bool = Form(False),
     title: str = Form(""),
     artist: str = Form(""),
     instrument: str = Form("tenor"),
@@ -273,11 +399,30 @@ async def create_job(
         raise HTTPException(400, "Unsupported saxophone selection.")
     if plan not in {"free", "enhanced"}:
         raise HTTPException(400, "Unsupported transcription plan.")
+    has_upload = bool(original and original.filename)
+    requested_youtube_url = youtube_url.strip()
+    if has_upload == bool(requested_youtube_url):
+        raise HTTPException(400, "Choose exactly one source: an audio file or one YouTube video link.")
+    normalized_youtube_url = None
+    if requested_youtube_url:
+        if not settings.youtube_input_enabled:
+            raise HTTPException(503, "YouTube input is disabled on this server. Upload an audio file instead.")
+        if not youtube_authorized:
+            raise HTTPException(
+                400,
+                "Confirm that you are authorized under YouTube's terms and applicable law to download and process this video.",
+            )
+        if isolated and isolated.filename:
+            raise HTTPException(400, "A YouTube link cannot be combined with an uploaded isolated stem.")
+        try:
+            normalized_youtube_url = normalize_youtube_url(requested_youtube_url)
+        except YouTubeSourceError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     paid_checkout = None
     if settings.runtime_mode == "local":
         if plan != "free":
-            raise HTTPException(400, "Local SaxScribe supports only the free UVR workflow.")
+            raise HTTPException(400, "Local SaxScribe supports only the included workflow.")
         use_ai = False
         separation_provider = "uvr"
     elif settings.runtime_mode == "gcp":
@@ -286,11 +431,11 @@ async def create_job(
             separation_provider = "uvr"
         else:
             if isolated and isolated.filename:
-                raise HTTPException(400, "Enhanced uses LALAL.AI separation; remove the pre-isolated stem.")
+                raise HTTPException(400, "Enhanced performs its own horn isolation; remove the pre-isolated stem.")
             if not settings.lalal_api_key:
-                raise HTTPException(503, "LALAL_API_KEY is required for Enhanced processing.")
+                raise HTTPException(503, "Enhanced horn isolation is not configured.")
             if not os.getenv("OPENAI_API_KEY"):
-                raise HTTPException(503, "OPENAI_API_KEY is required for Enhanced AI review.")
+                raise HTTPException(503, "Enhanced AI review is not configured.")
             try:
                 paid_checkout = billing.verify_paid_enhanced_checkout(checkout_session_id.strip())
             except billing.BillingError as exc:
@@ -304,13 +449,14 @@ async def create_job(
     inputs = job_dir / "inputs"
     inputs.mkdir(parents=True)
 
-    original_name = Path(original.filename or "original.wav").name
+    original_name = Path(original.filename or "original.wav").name if has_upload else "YouTube link"
     isolated_name = Path(isolated.filename).name if isolated and isolated.filename else None
-    original_path = inputs / _safe_name(original_name, "original.wav")
+    original_path = inputs / _safe_name(original_name, "original.wav") if has_upload else None
     max_bytes = settings.max_upload_mb * 1024 * 1024
     isolated_path = None
     try:
-        await _save_upload(original, original_path, max_bytes)
+        if has_upload and original and original_path:
+            await _save_upload(original, original_path, max_bytes)
         if isolated and isolated.filename:
             isolated_path = inputs / _safe_name(isolated.filename, "isolated.wav")
             await _save_upload(isolated, isolated_path, max_bytes)
@@ -331,6 +477,10 @@ async def create_job(
             "payment_session_id": paid_checkout.session_id if paid_checkout else None,
             "highlight_uncertain": highlight_uncertain,
             "source_name": original_name,
+            "source_type": "youtube" if normalized_youtube_url else "upload",
+            "youtube_url": normalized_youtube_url,
+            "youtube_authorized": bool(normalized_youtube_url and youtube_authorized),
+            "youtube_authorized_at": _now() if normalized_youtube_url else None,
             "isolated_source_name": isolated_name,
         }
         payment_claimed = False
@@ -362,6 +512,7 @@ async def create_job(
             "use_ai": use_ai,
             "highlight_uncertain": highlight_uncertain,
             "source_name": original_name,
+            "source_type": "youtube" if normalized_youtube_url else "upload",
             "isolated_source_name": isolated_name,
         }
 
@@ -373,6 +524,9 @@ async def create_job(
             "percent": 0,
             "message": "Waiting for the local processing worker",
             "source_name": original_name,
+            "source_type": "youtube" if normalized_youtube_url else "upload",
+            "youtube_authorized": bool(normalized_youtube_url and youtube_authorized),
+            "youtube_authorized_at": _now() if normalized_youtube_url else None,
             "isolated_source_name": isolated_name,
             "instrument": instrument,
             "plan": plan,
@@ -390,6 +544,7 @@ async def create_job(
         job_id,
         job_dir,
         original_path,
+        normalized_youtube_url,
         isolated_path,
         title.strip(),
         artist.strip(),
@@ -408,6 +563,7 @@ async def create_job(
         "use_ai": use_ai,
         "highlight_uncertain": highlight_uncertain,
         "source_name": original_name,
+        "source_type": "youtube" if normalized_youtube_url else "upload",
         "isolated_source_name": isolated_name,
     }
 
@@ -437,21 +593,13 @@ def get_job(job_id: str) -> dict:
         job = get_gcp_job(job_id)
         if not job:
             raise HTTPException(404, "Job not found. It may have expired.")
-        result = dict(job)
-        result.pop("payment_session_id", None)
-        if result.get("result"):
-            for item in result["result"]["files"]:
-                item["url"] = f"/api/jobs/{job_id}/files/{quote(item['name'], safe='')}"
-        return result
+        return _public_job(job, job_id)
     with jobs_lock:
         job = jobs.get(job_id)
         if not job:
             raise HTTPException(404, "Job not found. It may have expired after a server restart.")
         result = dict(job)
-    if result.get("result"):
-        for item in result["result"]["files"]:
-            item["url"] = f"/api/jobs/{job_id}/files/{quote(item['name'], safe='')}"
-    return result
+    return _public_job(result, job_id)
 
 
 @app.get("/api/jobs/{job_id}/files/{filename}")
@@ -459,10 +607,14 @@ def download(job_id: str, filename: str):
     if filename != Path(filename).name or filename in {".", ".."}:
         raise HTTPException(404, "File not found.")
     if settings.runtime_mode == "gcp":
-        from .saxscribe.gcp_runtime import open_output
+        from .saxscribe.gcp_runtime import get_job as get_gcp_job, open_output
 
+        job = get_gcp_job(job_id)
+        item = _download_item(job or {}, filename)
+        if not item:
+            raise HTTPException(404, "File not found.")
         try:
-            handle, size, content_type = open_output(job_id, filename)
+            handle, size, content_type = open_output(job_id, item["name"])
         except FileNotFoundError:
             raise HTTPException(404, "File not found.")
         headers = {
@@ -471,17 +623,16 @@ def download(job_id: str, filename: str):
         }
         return StreamingResponse(handle, media_type=content_type, headers=headers)
 
-    path = settings.work_dir / job_id / "outputs" / filename
-    if not path.exists() or path.parent.resolve() != (settings.work_dir / job_id / "outputs").resolve():
-        raise HTTPException(404, "File not found.")
-    download_name = filename
     with jobs_lock:
         job = jobs.get(job_id, {})
-        for item in job.get("result", {}).get("files", []):
-            if item.get("name") == filename:
-                download_name = item.get("download_name") or filename
-                break
-    return FileResponse(path, filename=download_name)
+        item = _download_item(job, filename)
+    if not item:
+        raise HTTPException(404, "File not found.")
+    internal_name = str(item["name"])
+    path = settings.work_dir / job_id / "outputs" / internal_name
+    if not path.exists() or path.parent.resolve() != (settings.work_dir / job_id / "outputs").resolve():
+        raise HTTPException(404, "File not found.")
+    return FileResponse(path, filename=filename)
 
 
 FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
