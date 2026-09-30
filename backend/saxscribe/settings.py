@@ -15,6 +15,7 @@ DEFAULT_UVR_MODEL_SHA256 = "acc6d472b4b478da9c9ab5af45b167749e05a7f65b30c7d5988b
 class Settings:
     runtime_mode: str = os.getenv("RUNTIME_MODE", "local").lower()
     work_dir: Path = Path(os.getenv("WORK_DIR", str(DEFAULT_WORK_DIR)))
+    reference_dir: Path = Path(os.getenv("REFERENCE_DIR", str(DEFAULT_WORK_DIR / "references")))
     uvr_model_name: str = os.getenv("UVR_MODEL_NAME", "17_HP-Wind_Inst-UVR.pth")
     uvr_target_stem: str = os.getenv("UVR_TARGET_STEM", "Woodwinds")
     uvr_output_label: str = os.getenv("UVR_OUTPUT_LABEL", "Wind Inst")

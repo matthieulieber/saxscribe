@@ -273,3 +273,11 @@ footer p { margin: 0; }
   .principles { grid-template-columns: 1fr; gap: 20px; }
   footer { align-items: flex-start; gap: 12px; flex-direction: column; }
 }
+.reference-library { margin-top: 24px; }
+.reference-library details, .reference-library label, .reference-library button { margin: 12px 0; }
+.reference-library label { display: block; }
+.reference-library select { max-width: 100%; padding: 10px; }
+.reference-library audio { max-width: 100%; }
+.reference-library table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.reference-library th, .reference-library td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+.reference-library pre { max-height: 300px; overflow: auto; white-space: pre-wrap; }
