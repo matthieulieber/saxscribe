@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import ReferenceLibrary from './ReferenceLibrary'
 import {
   ArrowDownToLine,
   AudioLines,
@@ -537,6 +538,7 @@ function App() {
           </div>
           <p className="metadata-note"><Search size={14} /> Song details help cross-check tempo, key and meter. The uploaded audio remains authoritative.</p>
 
+
           <fieldset>
             <legend>Write the part for</legend>
             <div className="instrument-grid">
@@ -672,6 +674,10 @@ function App() {
           )}
         </aside>
       </section>
+
+      {health?.runtime_mode === 'local' && <ReferenceLibrary instrument={instrument} job={job} onLoad={(file, reference) => {
+        setOriginal(file); setIsolated(null); setInputMode('upload'); setInstrument(reference.instrument); setTitle(reference.title); setArtist(''); setError('')
+      }} />}
 
       <section className="principles">
         <article><b>01</b><h3>Two audio views</h3><p>The original mix supplies beat, harmony and tuning. The isolated stem supplies the sax pitches.</p></article>

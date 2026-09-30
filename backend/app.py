@@ -31,6 +31,7 @@ from .saxscribe.youtube import (  # noqa: E402
     download_youtube_audio,
     normalize_youtube_url,
 )
+from .saxscribe.reference_api import router as reference_router  # noqa: E402
 
 
 app = FastAPI(title="SaxScribe API", version="0.18.0")
@@ -45,6 +46,7 @@ app.add_middleware(
     allow_methods=["*"] ,
     allow_headers=["*"],
 )
+app.include_router(reference_router)
 
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="saxscribe")
 jobs: dict[str, dict] = {}
@@ -283,6 +285,8 @@ def _prune() -> None:
     if not settings.work_dir.exists():
         return
     for path in settings.work_dir.iterdir():
+        if path.resolve() == settings.reference_dir.resolve() or path.resolve() in settings.reference_dir.resolve().parents:
+            continue
         if path.is_dir() and datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < cutoff:
             shutil.rmtree(path, ignore_errors=True)
 
@@ -290,6 +294,7 @@ def _prune() -> None:
 @app.on_event("startup")
 def startup() -> None:
     settings.work_dir.mkdir(parents=True, exist_ok=True)
+    settings.reference_dir.mkdir(parents=True, exist_ok=True)
     _prune()
     if settings.runtime_mode == "local":
         _load_local_jobs()
